@@ -458,120 +458,174 @@ export default function App() {
   async function exportWebCodecs() {
     const { w, h } = exportDims
     const FPS = 30
+    const OUT_SR = 48000
     const total = clips.reduce((a, c) => a + clipDur(c), 0)
     const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
-    // pick video codec
-    const codecCandidates = ['avc1.640028', 'avc1.4D4028', 'avc1.42E01E']
+    // --- 1) pick a supported H.264 codec (isConfigSupported returns {supported}) ---
     let videoCodec = null
-    for (const c of codecCandidates) {
+    for (const c of ['avc1.640028', 'avc1.4D4028', 'avc1.42E01E']) {
       try {
-        if (await VideoEncoder.isConfigSupported({ codec: c, width: w, height: h, bitrate: bitrate * 1_000_000, framerate: FPS })) { videoCodec = c; break }
+        const res = await VideoEncoder.isConfigSupported({ codec: c, width: w, height: h, bitrate: bitrate * 1_000_000, framerate: FPS })
+        if (res && res.supported) { videoCodec = c; break }
       } catch {}
     }
     if (!videoCodec) throw new Error('codec')
 
+    // --- 2) render the whole project audio offline (48kHz stereo, with volume/trim; gaps = silence) ---
+    let audioPcm = null
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+      const parts = []
+      let t0 = 0
+      for (const clip of clips) {
+        const d = clipDur(clip)
+        if (!clip.muted && clip.speed === 1 && clip.file && clip.trimEnd - clip.trimStart > 0.01) {
+          try {
+            const ab = await clip.file.arrayBuffer()
+            const buf = await audioCtx.decodeAudioData(ab)
+            parts.push({ buf, clip, start: t0 })
+          } catch {}
+        }
+        t0 += d
+      }
+      try { audioCtx.close() } catch {}
+      if (parts.length) {
+        const offline = new OfflineAudioContext(2, Math.max(1, Math.ceil(total * OUT_SR)), OUT_SR)
+        for (const { buf, clip, start } of parts) {
+          const src = offline.createBufferSource()
+          src.buffer = buf
+          const g = offline.createGain()
+          g.gain.value = clip.volume ?? 1
+          src.connect(g); g.connect(offline.destination)
+          const offset = Math.min(clip.trimStart, Math.max(0, buf.duration - 0.01))
+          const dur = Math.min(clip.trimEnd, buf.duration) - offset
+          if (dur > 0.01) src.start(start, offset, dur)
+        }
+        audioPcm = await offline.startRendering()
+      }
+    } catch { audioPcm = null }
+
+    // --- 3) audio encoder only if we actually have audio AND AAC is supported ---
+    let audioCodec = null
+    if (audioPcm) {
+      try {
+        const res = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', numberOfChannels: 2, sampleRate: OUT_SR, bitrate: 128000 })
+        if (res && res.supported) audioCodec = 'mp4a.40.2'
+      } catch {}
+      if (!audioCodec) audioPcm = null
+    }
+
+    // --- 4) muxer (audio track declared only when we have audio) ---
     const target = new ArrayBufferTarget()
     const muxer = new Muxer({
       target,
       video: { codec: 'avc', width: w, height: h },
-      audio: { codec: 'aac', numberOfChannels: 2, sampleRate: 48000 },
+      ...(audioCodec ? { audio: { codec: 'aac', numberOfChannels: 2, sampleRate: OUT_SR } } : {}),
       fastStart: 'in-memory',
     })
 
     const videoEncoder = new VideoEncoder()
-    videoEncoder.configure({ codec: videoCodec, width: w, height: h, bitrate: bitrate * 1_000_000, framerate: FPS, latencyMode: 'quality' })
-    videoEncoder.onoutput = (chunk, meta) => muxer.addVideoChunk(chunk, meta.decoderConfig)
+    videoEncoder.configure({ codec: videoCodec, width: w, height: h, bitrate: bitrate * 1_000_000, framerate: FPS })
+    // IMPORTANT: pass the FULL meta object — mp4-muxer reads meta.decoderConfig to write avcC
+    videoEncoder.onoutput = (chunk, meta) => muxer.addVideoChunk(chunk, meta)
 
-    let audioEncoder = null
-    try {
-      audioEncoder = new AudioEncoder()
-      audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 128000 })
-      audioEncoder.onoutput = (chunk, meta) => muxer.addAudioChunk(chunk, meta.decoderConfig)
-    } catch { audioEncoder = null }
+    // --- 5) encode audio first (cheap) ---
+    if (audioCodec && audioPcm) {
+      const audioEncoder = new AudioEncoder()
+      audioEncoder.configure({ codec: audioCodec, numberOfChannels: 2, sampleRate: OUT_SR, bitrate: 128000 })
+      audioEncoder.onoutput = (chunk, meta) => muxer.addAudioChunk(chunk, meta)
+      const ch0 = audioPcm.getChannelData(0)
+      const ch1 = audioPcm.numberOfChannels > 1 ? audioPcm.getChannelData(1) : ch0
+      const CHUNK = 16384
+      for (let off = 0; off < audioPcm.length; off += CHUNK) {
+        if (cancelRef.current) break
+        const len = Math.min(CHUNK, audioPcm.length - off)
+        // f32-planar requires ONE buffer with all channel planes concatenated
+        const data = new Float32Array(len * 2)
+        data.set(ch0.subarray(off, off + len), 0)
+        data.set(ch1.subarray(off, off + len), len)
+        const ad = new AudioData({
+          format: 'f32-planar', sampleRate: OUT_SR, numberOfFrames: len, numberOfChannels: 2,
+          timestamp: Math.round((off / OUT_SR) * 1e6), data,
+        })
+        audioEncoder.encode(ad)
+        ad.close()
+      }
+      if (cancelRef.current) { try { audioEncoder.close() } catch {}; try { videoEncoder.close() } catch {}; throw new Error('cancelled') }
+      await audioEncoder.flush()
+      audioEncoder.close()
+    }
 
+    // --- 6) video frames (seek-based, sequential forward = fast) ---
     const hidden = makeHiddenVideo()
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-    let elapsed = 0
+    let seekResolve = null
+    hidden.addEventListener('seeked', () => { if (seekResolve) { const r = seekResolve; seekResolve = null; r() } })
+    const seekVideo = async (t) => {
+      if (Math.abs(hidden.currentTime - t) < 1e-4) return
+      const p = new Promise(r => { seekResolve = r })
+      hidden.currentTime = t
+      await Promise.race([p, sleep(800)])
+    }
 
+    let elapsed = 0
     for (let ci = 0; ci < clips.length; ci++) {
       if (cancelRef.current) break
       const clip = clips[ci]
       hidden.src = clip.url
-      await waitFor(hidden, 'loadedmetadata', 3000)
+      await waitFor(hidden, 'loadeddata', 4000) // loadeddata = first frame ready to draw
       const clipOutDur = clipDur(clip)
       const nFrames = Math.max(1, Math.round(clipOutDur * FPS))
+      const safeEnd = Math.max(clip.trimStart, clip.trimEnd - 1 / FPS)
 
-      // --- video frames (seek-based, fast) ---
       for (let f = 0; f < nFrames; f++) {
         if (cancelRef.current) break
         const t = f / FPS
-        const local = clip.trimStart + t * clip.speed
-        hidden.currentTime = local
-        await waitFor(hidden, 'seeked', 1200)
+        const local = Math.min(clip.trimStart + t * clip.speed, safeEnd)
+        await seekVideo(local)
         drawFrameToCanvas(ctx, w, h, hidden, clip)
         const ts = Math.round((elapsed + t) * 1e6)
         const frame = new VideoFrame(canvas, { timestamp: ts, duration: Math.round(1e6 / FPS) })
         videoEncoder.encode(frame)
         frame.close()
+        // backpressure: don't let the encoder queue grow unbounded
+        while (videoEncoder.encodeQueueSize > 30 && !cancelRef.current) await sleep(4)
         setExportProgress(Math.min(99, ((elapsed + t) / total) * 100))
-        // yield to keep UI alive
-        if (f % 15 === 0) await new Promise(r => setTimeout(r, 0))
-      }
-
-      // --- audio (only at 1x; other speeds export silent for that clip) ---
-      if (audioEncoder && !clip.muted && clip.speed === 1 && clip.file) {
-        try {
-          const ab = await clip.file.arrayBuffer()
-          const audioBuf = await audioCtx.decodeAudioData(ab)
-          const sr = audioBuf.sampleRate
-          const nCh = Math.min(2, audioBuf.numberOfChannels)
-          const startF = Math.floor(clip.trimStart * sr)
-          const endF = Math.min(audioBuf.length, Math.floor(clip.trimEnd * sr))
-          const segLen = Math.max(0, endF - startF)
-          if (segLen > 0) {
-            const vol = clip.volume ?? 1
-            const chunkFrames = Math.floor(sr * 0.1)
-            for (let off = 0; off < segLen; off += chunkFrames) {
-              if (cancelRef.current) break
-              const len = Math.min(chunkFrames, segLen - off)
-              const data = []
-              for (let ch = 0; ch < nCh; ch++) {
-                const src = audioBuf.getChannelData(ch)
-                const piece = new Float32Array(len)
-                for (let i = 0; i < len; i++) piece[i] = (src[startF + off + i] || 0) * vol
-                data.push(piece)
-              }
-              while (data.length < 2) data.push(new Float32Array(len))
-              const ad = new AudioData({
-                format: 'f32-planar', numberOfFrames: len, sampleRate: sr, numberOfChannels: 2,
-                timestamp: Math.round((elapsed + off / sr) * 1e6), data,
-              })
-              audioEncoder.encode(ad)
-              ad.close()
-            }
-          }
-        } catch {}
+        if (f % 20 === 0) await sleep(0) // keep UI alive
       }
       elapsed += clipOutDur
     }
 
     hidden.remove()
-    if (cancelRef.current) { try { videoEncoder.close() } catch {}; try { audioEncoder?.close() } catch {}; throw new Error('cancelled') }
-    await videoEncoder.flush(); videoEncoder.close()
-    if (audioEncoder) { await audioEncoder.flush(); audioEncoder.close() }
+    if (cancelRef.current) { try { videoEncoder.close() } catch {}; throw new Error('cancelled') }
+    await videoEncoder.flush()
+    videoEncoder.close()
     muxer.finalize()
     return new Blob([target.buffer], { type: 'video/mp4' })
   }
 
-  // Fallback: real-time MediaRecorder (WebM preferred for correct duration)
+  // Fallback: real-time MediaRecorder (with audio captured from the video element)
   async function exportMediaRecorder() {
     const { w, h } = exportDims
     const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
-    const stream = canvas.captureStream(30)
-    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4']
+    const hidden = makeHiddenVideo()
+
+    // capture canvas video + element audio into one stream
+    const canvasStream = canvas.captureStream(30)
+    let stream = canvasStream
+    let audioCtx = null
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+      const srcNode = audioCtx.createMediaElementSource(hidden)
+      const dest = audioCtx.createMediaStreamDestination()
+      srcNode.connect(dest)
+      stream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()])
+    } catch {}
+
+    const mime = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
       .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''
     let recorder
     const chunks = []
@@ -583,7 +637,6 @@ export default function App() {
 
     const total = clips.reduce((a, c) => a + clipDur(c), 0)
     let elapsed = 0
-    const hidden = makeHiddenVideo()
     hidden.muted = false
 
     for (let ci = 0; ci < clips.length; ci++) {
@@ -612,6 +665,7 @@ export default function App() {
       elapsed += clipOutDur
     }
     hidden.remove()
+    try { audioCtx?.close() } catch {}
     if (cancelRef.current) { try { recorder.stop() } catch {}; throw new Error('cancelled') }
     recorder.stop(); await done
     return new Blob(chunks, { type: recorder.mimeType || 'video/webm' })
@@ -893,7 +947,7 @@ export default function App() {
                   <span style={{ fontSize: 12 }}>Quanto menor a resolução e a taxa de bits, menor o arquivo — mas com menos qualidade.</span>
                 </p>
                 <h3>Exportação</h3>
-                <p className="hint">A exportação é feita no navegador via Canvas + MediaRecorder. O arquivo final é WebM (ou MP4, se o navegador suportar).</p>
+                <p className="hint">A exportação é feita no navegador com renderização quadro a quadro (WebCodecs) — sai em MP4 com áudio, com a duração exata do projeto e mais rápido que o tempo real. Navegadores sem suporte usam o modo em tempo real.</p>
                 <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} disabled={!clips.length} onClick={exportVideo}>⬇ Exportar agora</button>
               </>
             )}
