@@ -34,9 +34,11 @@ function buildTransform(c) {
   let t = ''
   if (c.rotation) t += `rotate(${c.rotation}deg) `
   if (c.flipH) t += `scaleX(-1) `
+  if (c.scale && c.scale !== 1) t += `scale(${c.scale}) `
   return t.trim() || 'none'
 }
 function clipDur(c) { return Math.max(0.1, (c.trimEnd - c.trimStart) / c.speed) }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)) }
 
 function captureThumb(url) {
   return new Promise((resolve) => {
@@ -72,13 +74,14 @@ export default function App() {
   const [tab, setTab] = useState('midia')
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [zoom, setZoom] = useState(60) // px per second
+  const [zoom, setZoom] = useState(10) // px per second (fit-to-screen)
   const [dragOver, setDragOver] = useState(false)
   const [toast, setToast] = useState('')
   const [exporting, setExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState(0)
-  const [exportDone, setExportDone] = useState(null) // {url, name}
+  const [exportDone, setExportDone] = useState(null)
   const [showExportModal, setShowExportModal] = useState(false)
+  const [cropping, setCropping] = useState(false)
 
   const videoRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -88,6 +91,9 @@ export default function App() {
   const rafRef = useRef(null)
   const lastTsRef = useRef(0)
   const trimDragRef = useRef(null)
+  const tlScrollRef = useRef(null)
+  const previewBoxRef = useRef(null)
+  const cropDragRef = useRef(null)
 
   clipsRef.current = clips
   timeRef.current = currentTime
@@ -112,24 +118,56 @@ export default function App() {
     setClips(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c))
   }, [])
 
+  const fitZoom = useCallback(() => {
+    const el = tlScrollRef.current
+    if (!el || totalDur <= 0) return
+    const avail = Math.max(300, el.clientWidth - 24)
+    const z = clamp(avail / totalDur, 4, 200)
+    setZoom(z)
+    el.scrollLeft = 0
+  }, [totalDur])
+
+  // Auto-fit when clips change (new video added / removed)
+  const prevClipsLen = useRef(0)
+  useEffect(() => {
+    if (clips.length !== prevClipsLen.current) {
+      prevClipsLen.current = clips.length
+      // small delay so container has size
+      setTimeout(fitZoom, 50)
+    }
+  }, [clips.length, fitZoom])
+
+  // Keep playhead visible while playing
+  useEffect(() => {
+    if (!isPlaying) return
+    const el = tlScrollRef.current
+    if (!el) return
+    const x = currentTime * zoom
+    if (x < el.scrollLeft + 40 || x > el.scrollLeft + el.clientWidth - 80) {
+      el.scrollLeft = Math.max(0, x - el.clientWidth / 2)
+    }
+  }, [currentTime, isPlaying, zoom])
+
   const addFiles = useCallback(async (fileList) => {
     const files = Array.from(fileList).filter(f => f.type.startsWith('video/'))
     if (!files.length) { showToast('Selecione arquivos de vídeo'); return }
     const newClips = []
     for (const file of files) {
       const url = URL.createObjectURL(file)
-      const dur = await new Promise((res) => {
+      const meta = await new Promise((res) => {
         const v = document.createElement('video')
         v.preload = 'metadata'; v.src = url
-        v.onloadedmetadata = () => res(v.duration || 0)
-        v.onerror = () => res(0)
-        setTimeout(() => res(0), 5000)
+        v.onloadedmetadata = () => res({ duration: v.duration || 0, w: v.videoWidth || 1280, h: v.videoHeight || 720 })
+        v.onerror = () => res({ duration: 0, w: 1280, h: 720 })
+        setTimeout(() => res({ duration: 0, w: 1280, h: 720 }), 5000)
       })
       const thumb = await captureThumb(url)
       newClips.push({
-        id: uid(), name: file.name, url, file, duration: dur || 10, thumb,
-        trimStart: 0, trimEnd: dur || 10, speed: 1, volume: 1, muted: false,
-        rotation: 0, flipH: false,
+        id: uid(), name: file.name, url, file, duration: meta.duration || 10, thumb,
+        videoW: meta.w, videoH: meta.h,
+        trimStart: 0, trimEnd: meta.duration || 10, speed: 1, volume: 1, muted: false,
+        rotation: 0, flipH: false, scale: 1,
+        cropEnabled: false, cropX: 0, cropY: 0, cropW: 1, cropH: 1,
         brightness: 1, contrast: 1, saturate: 1, grayscale: 0, sepia: 0, blur: 0, hue: 0,
         preset: 'original',
         textEnabled: false, textContent: 'Seu texto aqui', textSize: 42, textColor: '#ffffff',
@@ -163,7 +201,6 @@ export default function App() {
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [isPlaying])
 
-  // Sync video element with locator
   useEffect(() => {
     const v = videoRef.current
     if (!v || !locator.clip) return
@@ -172,9 +209,14 @@ export default function App() {
       v.src = locator.clip.url
       v.playbackRate = locator.clip.speed
       v.volume = locator.clip.muted ? 0 : locator.clip.volume
-      v.onloadedmetadata = () => { try { v.currentTime = local } catch {} ; if (playingRef.current) v.play().catch(()=>{}) }
+      v.onloadedmetadata = () => {
+        try { v.currentTime = local } catch {}
+        if (v.videoWidth && locator.clip.videoW !== v.videoWidth) {
+          updateClip(locator.clip.id, { videoW: v.videoWidth, videoH: v.videoHeight })
+        }
+        if (playingRef.current) v.play().catch(()=>{})
+      }
     } else {
-      // seek if drift > 0.35s
       if (Math.abs(v.currentTime - local) > 0.35) { try { v.currentTime = local } catch {} }
       v.playbackRate = locator.clip.speed
       v.volume = locator.clip.muted ? 0 : locator.clip.volume
@@ -183,10 +225,9 @@ export default function App() {
     }
   }, [locator.clip?.id, locator.offset, isPlaying])
 
-  // Pause video when not playing
   useEffect(() => { const v = videoRef.current; if (v && !isPlaying) v.pause() }, [isPlaying])
+  useEffect(() => { if (cropping) setIsPlaying(false) }, [cropping])
 
-  // Keyboard space
   useEffect(() => {
     const h = (e) => {
       if (e.code === 'Space' && !['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) {
@@ -198,7 +239,7 @@ export default function App() {
   })
 
   function togglePlay() {
-    if (!clips.length) return
+    if (!clips.length || cropping) return
     if (currentTime >= totalDur - 0.05 && !isPlaying) setCurrentTime(0)
     setIsPlaying(p => !p)
   }
@@ -206,10 +247,8 @@ export default function App() {
   function seekTo(t) {
     const clamped = Math.max(0, Math.min(totalDur, t))
     setCurrentTime(clamped)
-    // force video seek
     const v = videoRef.current
     if (v && locator.clip) {
-      // recompute locator for clamped
       let tt = clamped, clip = clips[0], off = 0
       for (let i = 0; i < clips.length; i++) {
         const d = clipDur(clips[i])
@@ -243,7 +282,6 @@ export default function App() {
     setClips(next)
   }
 
-  // Trim drag
   function startTrim(e, clipId, side) {
     e.preventDefault(); e.stopPropagation()
     const startX = e.clientX
@@ -264,11 +302,78 @@ export default function App() {
     window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
   }
 
-  // Timeline click seek
   function onRulerClick(e) {
     const rect = e.currentTarget.getBoundingClientRect()
     const x = e.clientX - rect.left
     seekTo(x / zoom)
+  }
+
+  // --- Crop drag ---
+  function startCropDrag(e, mode) {
+    e.preventDefault(); e.stopPropagation()
+    const box = previewBoxRef.current
+    if (!box || !selected) return
+    const rect = box.getBoundingClientRect()
+    const orig = { x: selected.cropX, y: selected.cropY, w: selected.cropW, h: selected.cropH }
+    cropDragRef.current = { mode, rect, orig, clipId: selected.id }
+    const onMove = (ev) => {
+      const d = cropDragRef.current; if (!d) return
+      const dx = (ev.clientX - d.rect.left) / d.rect.width
+      const dy = (ev.clientY - d.rect.top) / d.rect.height
+      const sx = (d.startX ?? d.rect.left) // not used
+      let { x, y, w, h } = d.orig
+      const ddx = (ev.clientX - d.startClientX) / d.rect.width
+      const ddy = (ev.clientY - d.startClientY) / d.rect.height
+      if (d.mode === 'move') {
+        x = clamp(d.orig.x + ddx, 0, 1 - d.orig.w)
+        y = clamp(d.orig.y + ddy, 0, 1 - d.orig.h)
+      } else {
+        if (d.mode.includes('e')) w = clamp(d.orig.w + ddx, 0.08, 1 - d.orig.x)
+        if (d.mode.includes('s')) h = clamp(d.orig.h + ddy, 0.08, 1 - d.orig.y)
+        if (d.mode.includes('w')) {
+          const nx = clamp(d.orig.x + ddx, 0, d.orig.x + d.orig.w - 0.08)
+          w = d.orig.w + (d.orig.x - nx); x = nx
+        }
+        if (d.mode.includes('n')) {
+          const ny = clamp(d.orig.y + ddy, 0, d.orig.y + d.orig.h - 0.08)
+          h = d.orig.h + (d.orig.y - ny); y = ny
+        }
+      }
+      updateClip(d.clipId, { cropX: x, cropY: y, cropW: w, cropH: h, cropEnabled: true })
+    }
+    cropDragRef.current.startClientX = e.clientX
+    cropDragRef.current.startClientY = e.clientY
+    const onUp = () => { cropDragRef.current = null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+  }
+
+  function applyCropPreset(name) {
+    if (!selected) return
+    const vw = selected.videoW || 1280, vh = selected.videoH || 720
+    const videoRatio = vw / vh
+    const mk = (ratio) => {
+      // largest rect with given ratio centered
+      if (videoRatio >= ratio) {
+        const w = (vh * ratio) / vw
+        return { cropX: (1 - w) / 2, cropY: 0, cropW: w, cropH: 1 }
+      } else {
+        const h = (vw / ratio) / vh
+        return { cropX: 0, cropY: (1 - h) / 2, cropW: 1, cropH: h }
+      }
+    }
+    const presets = {
+      cheia: { cropX: 0, cropY: 0, cropW: 1, cropH: 1 },
+      '16:9': mk(16 / 9),
+      '9:16': mk(9 / 16),
+      '1:1': mk(1),
+      '4:5': mk(4 / 5),
+      esquerda: { cropX: 0, cropY: 0, cropW: 0.5, cropH: 1 },
+      direita: { cropX: 0.5, cropY: 0, cropW: 0.5, cropH: 1 },
+      topo: { cropX: 0, cropY: 0, cropW: 1, cropH: 0.5 },
+      base: { cropX: 0, cropY: 0.5, cropW: 1, cropH: 0.5 },
+    }
+    const p = presets[name]
+    if (p) updateClip(selected.id, { ...p, cropEnabled: !(name === 'cheia') })
   }
 
   // --- Export ---
@@ -279,7 +384,6 @@ export default function App() {
     const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
     const stream = canvas.captureStream(30)
-    // try audio from first video element (preview) — best effort
     let audioTrack = null
     try {
       const v = videoRef.current
@@ -319,22 +423,26 @@ export default function App() {
       await new Promise((resolve) => {
         const draw = () => {
           const played = (performance.now() - startReal) / 1000
-          // draw frame
           ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h)
           ctx.save()
           try { ctx.filter = buildFilter(clip) } catch {}
           const vw = hidden.videoWidth || w, vh = hidden.videoHeight || h
           const rot = (clip.rotation || 0) * Math.PI / 180
           const swap = clip.rotation === 90 || clip.rotation === 270
-          const srcW = swap ? vh : vw, srcH = swap ? vw : vh
-          const scale = Math.min(w / srcW, h / srcH)
-          const dw = srcW * scale, dh = srcH * scale
+          // crop source rect
+          const cx = clip.cropEnabled ? (clip.cropX || 0) : 0
+          const cy = clip.cropEnabled ? (clip.cropY || 0) : 0
+          const cw = clip.cropEnabled ? (clip.cropW || 1) : 1
+          const ch = clip.cropEnabled ? (clip.cropH || 1) : 1
+          const sx = cx * vw, sy = cy * vh, sw = cw * vw, sh = ch * vh
+          const srcW = swap ? sh : sw, srcH = swap ? sw : sh
+          const fit = Math.min(w / srcW, h / srcH)
+          const dw = srcW * fit * (clip.scale || 1), dh = srcH * fit * (clip.scale || 1)
           ctx.translate(w / 2, h / 2)
           ctx.rotate(rot)
           if (clip.flipH) ctx.scale(-1, 1)
-          ctx.drawImage(hidden, -dw / 2, -dh / 2, dw, dh)
+          ctx.drawImage(hidden, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh)
           ctx.restore()
-          // text
           if (clip.textEnabled && clip.textContent) {
             ctx.save()
             ctx.font = `800 ${clip.textSize}px Inter, sans-serif`
@@ -373,12 +481,20 @@ export default function App() {
     ? { aspectRatio: `${ASPECTS[aspect].w}/${ASPECTS[aspect].h}`, width: 'min(100%, 960px)' }
     : { aspectRatio: `${ASPECTS[aspect].w}/${ASPECTS[aspect].h}`, height: 'min(100%, 54vh)' }
 
+  const rulerStep = zoom < 8 ? 10 : zoom < 25 ? 5 : zoom < 60 ? 2 : 1
   const rulerTicks = useMemo(() => {
     const arr = []
-    const step = zoom < 30 ? 5 : 1
-    for (let s = 0; s <= Math.ceil(totalDur); s += step) arr.push(s)
+    for (let s = 0; s <= Math.ceil(totalDur); s += rulerStep) arr.push(s)
     return arr
-  }, [totalDur, zoom])
+  }, [totalDur, rulerStep])
+
+  const lc = locator.clip
+  const cropInnerStyle = lc ? {
+    width: `${100 / (lc.cropEnabled ? lc.cropW : 1)}%`,
+    height: `${100 / (lc.cropEnabled ? lc.cropH : 1)}%`,
+    left: `${-(lc.cropEnabled ? lc.cropX : 0) / (lc.cropEnabled ? lc.cropW : 1) * 100}%`,
+    top: `${-(lc.cropEnabled ? lc.cropY : 0) / (lc.cropEnabled ? lc.cropH : 1) * 100}%`,
+  } : {}
 
   return (
     <div className="app">
@@ -394,7 +510,7 @@ export default function App() {
       <div className="main">
         <aside className="sidebar">
           <div className="tabs">
-            {[['midia','🎞 Mídia'],['filtros','🎨 Filtros'],['texto','T Texto'],['ajustes','⚙ Ajustes'],['formato','▭ Formato']].map(([id, label]) => (
+            {[['midia','🎞 Mídia'],['filtros','🎨 Filtros'],['texto','T Texto'],['recorte','✂ Recorte'],['ajustes','⚙ Ajustes'],['formato','▭ Formato']].map(([id, label]) => (
               <button key={id} className={`tab ${tab === id ? 'active' : ''}`} onClick={() => setTab(id)}>{label}</button>
             ))}
           </div>
@@ -420,7 +536,7 @@ export default function App() {
                   {clips.map((c, i) => (
                     <div key={c.id} className={`clip-item ${selected?.id === c.id ? 'active' : ''}`} onClick={() => setSelectedId(c.id)}>
                       {c.thumb ? <img src={c.thumb} alt="" /> : <div style={{ width: 64, height: 40, background: '#000', borderRadius: 8, display: 'grid', placeItems: 'center' }}>🎬</div>}
-                      <div className="meta"><b>{i + 1}. {c.name}</b><span>{fmt(clipDur(c))} · {c.speed}×</span></div>
+                      <div className="meta"><b>{i + 1}. {c.name}</b><span>{fmt(clipDur(c))} · {c.speed}×{c.cropEnabled ? ' · ✂' : ''}</span></div>
                       <button className="icon-btn" title="Duplicar" onClick={e => { e.stopPropagation(); duplicateClip(c.id) }}>⧉</button>
                       <button className="icon-btn" title="Remover" onClick={e => { e.stopPropagation(); removeClip(c.id) }}>✕</button>
                     </div>
@@ -486,6 +602,50 @@ export default function App() {
               </>
             )}
 
+            {tab === 'recorte' && (
+              <>
+                <h3>Recortar parte da tela</h3>
+                <p className="hint">Selecione apenas uma área do vídeo — ideal para focar em uma parte da tela, remover bordas ou transformar um vídeo horizontal em vertical.</p>
+                {!selected && <p className="hint">Adicione um vídeo primeiro.</p>}
+                {selected && <>
+                  <div className="toggle-row">Recorte ativo
+                    <button className={`switch ${selected.cropEnabled ? 'on' : ''}`} onClick={() => updateClip(selected.id, { cropEnabled: !selected.cropEnabled })} />
+                  </div>
+                  <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', margin: '12px 0' }}
+                    onClick={() => { setCropping(c => !c); setIsPlaying(false) }}>
+                    {cropping ? '✅ Concluir recorte' : '✂ Editar recorte na tela'}
+                  </button>
+                  <p className="hint">No modo de edição, arraste a caixa roxa para mover e os cantos para redimensionar direto na prévia.</p>
+                  <h3>Presets rápidos</h3>
+                  <div className="chip-row">
+                    {[['cheia','Tela cheia'],['16:9','Centro 16:9'],['9:16','Centro 9:16'],['1:1','Centro 1:1'],['4:5','Centro 4:5'],['esquerda','Esquerda'],['direita','Direita'],['topo','Topo'],['base','Base']].map(([v, l]) => (
+                      <button key={v} className="chip" onClick={() => applyCropPreset(v)}>{l}</button>
+                    ))}
+                  </div>
+                  <h3>Tamanho / Zoom</h3>
+                  <div className="field">
+                    <label>Zoom (tamanho do vídeo) <output>{(selected.scale || 1).toFixed(2)}×</output></label>
+                    <input type="range" min={1} max={3} step={0.05} value={selected.scale || 1}
+                      onChange={e => updateClip(selected.id, { scale: parseFloat(e.target.value) })} />
+                  </div>
+                  <div className="chip-row">
+                    {[1, 1.25, 1.5, 2, 3].map(v => (
+                      <button key={v} className={`chip ${(selected.scale || 1) === v ? 'active' : ''}`} onClick={() => updateClip(selected.id, { scale: v })}>{v}×</button>
+                    ))}
+                  </div>
+                  <h3>Posição do recorte</h3>
+                  {[['cropX','Esquerda',0,1,0.01],['cropY','Topo',0,1,0.01],['cropW','Largura',0.08,1,0.01],['cropH','Altura',0.08,1,0.01]].map(([k, label, min, max, step]) => (
+                    <div className="field" key={k}>
+                      <label>{label} <output>{Math.round((selected[k] || 0) * 100)}%</output></label>
+                      <input type="range" min={min} max={max} step={step} value={selected[k]}
+                        onChange={e => updateClip(selected.id, { [k]: parseFloat(e.target.value), cropEnabled: true })} />
+                    </div>
+                  ))}
+                  <button className="btn btn-ghost btn-sm" onClick={() => updateClip(selected.id, { cropX: 0, cropY: 0, cropW: 1, cropH: 1, cropEnabled: false, scale: 1 })}>↺ Resetar recorte e zoom</button>
+                </>}
+              </>
+            )}
+
             {tab === 'ajustes' && (
               <>
                 <h3>Velocidade e áudio</h3>
@@ -530,7 +690,7 @@ export default function App() {
             {tab === 'formato' && (
               <>
                 <h3>Formato do projeto</h3>
-                <p className="hint">Escolha o formato ideal para onde vai publicar.</p>
+                <p className="hint">Escolha o formato ideal para onde vai publicar. Combine com o <b>Recorte</b> para enquadrar a parte da tela que quiser.</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {Object.entries(ASPECTS).map(([k, v]) => (
                     <button key={k} className={`chip ${aspect === k ? 'active' : ''}`} style={{ textAlign: 'left', padding: '12px 14px' }} onClick={() => setAspect(k)}>{v.label}</button>
@@ -546,7 +706,7 @@ export default function App() {
 
         <section className="stage">
           <div className="stage-top">
-            <span className="timecode"><b>{fmt(currentTime)}</b> / {fmt(totalDur)} · {aspect}</span>
+            <span className="timecode"><b>{fmt(currentTime)}</b> / {fmt(totalDur)} · {aspect}{cropping ? ' · ✂ Editando recorte' : ''}</span>
             <span className="timecode">{clips.length} clipe(s) · <span className="kbd">Espaço</span> play/pause</span>
           </div>
           <div className="preview-wrap">
@@ -559,23 +719,42 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="preview-box" style={previewStyle}>
-                <video ref={videoRef} playsInline preload="auto"
-                  style={{ filter: locator.clip ? buildFilter(locator.clip) : 'none', transform: locator.clip ? buildTransform(locator.clip) : 'none' }} />
-                {locator.clip?.textEnabled && locator.clip?.textContent && (
-                  <div className={`text-overlay ${locator.clip.textPos}`}
-                    style={{ fontSize: Math.max(14, locator.clip.textSize * 0.55), color: locator.clip.textColor, background: locator.clip.textBg }}>
-                    {locator.clip.textContent}
+              <div className="preview-box" ref={previewBoxRef} style={previewStyle}>
+                <div className="crop-viewport">
+                  <div className="crop-inner" style={cropInnerStyle}>
+                    <video ref={videoRef} playsInline preload="auto"
+                      style={{ filter: lc ? buildFilter(lc) : 'none', transform: lc ? buildTransform(lc) : 'none' }} />
                   </div>
+                </div>
+                {lc?.textEnabled && lc?.textContent && (
+                  <div className={`text-overlay ${lc.textPos}`}
+                    style={{ fontSize: Math.max(14, lc.textSize * 0.55), color: lc.textColor, background: lc.textBg }}>
+                    {lc.textContent}
+                  </div>
+                )}
+                {cropping && lc && (
+                  <>
+                    <div className="crop-box"
+                      style={{ left: `${lc.cropX * 100}%`, top: `${lc.cropY * 100}%`, width: `${lc.cropW * 100}%`, height: `${lc.cropH * 100}%` }}
+                      onMouseDown={e => startCropDrag(e, 'move')}>
+                      {['nw','ne','sw','se','n','s','w','e'].map(h => (
+                        <div key={h} className={`crop-handle ${h}`} onMouseDown={e => startCropDrag(e, h)} />
+                      ))}
+                    </div>
+                    <div className="crop-bar">
+                      <button className="btn btn-ghost btn-sm" onClick={() => applyCropPreset('cheia')}>Tela cheia</button>
+                      <button className="btn btn-primary btn-sm" onClick={() => setCropping(false)}>✅ Concluir</button>
+                    </div>
+                  </>
                 )}
               </div>
             )}
           </div>
           <div className="controls">
             <button className="icon-btn" disabled={!clips.length} onClick={() => seekTo(0)} title="Início">⏮</button>
-            <button className="play-btn" disabled={!clips.length} onClick={togglePlay}>{isPlaying ? '⏸' : '▶'}</button>
+            <button className="play-btn" disabled={!clips.length || cropping} onClick={togglePlay}>{isPlaying ? '⏸' : '▶'}</button>
             <button className="icon-btn" disabled={!clips.length} onClick={() => seekTo(totalDur)} title="Fim">⏭</button>
-            <span className="timecode" style={{ marginLeft: 8 }}>{locator.clip ? `Clipe: ${locator.clip.name}` : ''}</span>
+            <span className="timecode" style={{ marginLeft: 8 }}>{lc ? `Clipe: ${lc.name}` : ''}</span>
           </div>
         </section>
       </div>
@@ -585,8 +764,9 @@ export default function App() {
           <b style={{ fontSize: 13 }}>Timeline</b>
           <span className="timecode">{fmt(totalDur)}</span>
           <div className="spacer" />
+          <button className="btn btn-ghost btn-sm" onClick={fitZoom} title="Ajustar timeline à tela">⛶ Ajustar à tela</button>
           <span className="timecode">Zoom</span>
-          <input type="range" min={20} max={140} step={5} value={zoom} onChange={e => setZoom(parseInt(e.target.value))} style={{ width: 120, accentColor: 'var(--accent)' }} />
+          <input type="range" min={4} max={200} step={1} value={zoom} onChange={e => setZoom(parseInt(e.target.value))} style={{ width: 120, accentColor: 'var(--accent)' }} />
           {selected && <>
             <button className="btn btn-ghost btn-sm" onClick={() => moveClip(selected.id, -1)}>← Mover</button>
             <button className="btn btn-ghost btn-sm" onClick={() => moveClip(selected.id, 1)}>Mover →</button>
@@ -594,17 +774,17 @@ export default function App() {
             <button className="btn btn-danger btn-sm" onClick={() => removeClip(selected.id)}>✕ Excluir</button>
           </>}
         </div>
-        <div className="tl-scroll">
+        <div className="tl-scroll" ref={tlScrollRef}>
           {clips.length === 0 ? (
             <div className="tl-empty">Sua timeline está vazia — adicione vídeos na aba Mídia para começar ✂️</div>
           ) : (
-            <div className="tl-inner" style={{ width: Math.max(totalDur * zoom, 600) }}>
+            <div className="tl-inner" style={{ width: Math.max(totalDur * zoom, 300) }}>
               <div className="ruler" onClick={onRulerClick}>
                 {rulerTicks.map(s => <React.Fragment key={s}><i style={{ left: s * zoom }} /><span style={{ left: s * zoom }}>{fmt(s)}</span></React.Fragment>)}
               </div>
               <div className="track">
                 {clips.map(c => {
-                  const w = Math.max(110, clipDur(c) * zoom)
+                  const w = Math.max(80, clipDur(c) * zoom)
                   return (
                     <div key={c.id} className={`tl-clip ${selected?.id === c.id ? 'active' : ''}`} style={{ width: w }} onClick={() => setSelectedId(c.id)}>
                       <div className="handle left" onMouseDown={e => startTrim(e, c.id, 'left')} title="Arraste para cortar o início">◂</div>
