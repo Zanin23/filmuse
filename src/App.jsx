@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrayBufferTarget, Muxer } from 'mp4-muxer'
 
 const ASPECTS = {
   '16:9': { label: '16:9 · Horizontal', w: 1280, h: 720 },
@@ -85,6 +86,8 @@ export default function App() {
   const [resScale, setResScale] = useState(1) // 1, 0.75, 0.5, 0.33
   const [bitrate, setBitrate] = useState(8) // Mbps
   const [qualityPreset, setQualityPreset] = useState('alta')
+  const [exportCancelled, setExportCancelled] = useState(false)
+  const cancelRef = useRef(false)
 
   const videoRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -398,24 +401,177 @@ export default function App() {
   const estSizeMB = useMemo(() => (bitrate * totalDur) / 8, [bitrate, totalDur])
   const fmtSize = (mb) => mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`
 
-  // --- Export ---
-  async function exportVideo() {
-    if (!clips.length) return
-    setShowExportModal(true); setExporting(true); setExportProgress(0); setExportDone(null)
+  // --- Export helpers ---
+  function drawFrameToCanvas(ctx, w, h, source, clip) {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h)
+    ctx.save()
+    try { ctx.filter = buildFilter(clip) } catch {}
+    const vw = source.videoWidth || w, vh = source.videoHeight || h
+    const rot = (clip.rotation || 0) * Math.PI / 180
+    const swap = clip.rotation === 90 || clip.rotation === 270
+    const cx = clip.cropEnabled ? (clip.cropX || 0) : 0
+    const cy = clip.cropEnabled ? (clip.cropY || 0) : 0
+    const cw = clip.cropEnabled ? (clip.cropW || 1) : 1
+    const ch = clip.cropEnabled ? (clip.cropH || 1) : 1
+    const sx = cx * vw, sy = cy * vh, sw = Math.max(2, cw * vw), sh = Math.max(2, ch * vh)
+    const srcW = swap ? sh : sw, srcH = swap ? sw : sh
+    const fit = Math.min(w / srcW, h / srcH)
+    const dw = srcW * fit * (clip.scale || 1), dh = srcH * fit * (clip.scale || 1)
+    ctx.translate(w / 2, h / 2)
+    ctx.rotate(rot)
+    if (clip.flipH) ctx.scale(-1, 1)
+    ctx.drawImage(source, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh)
+    ctx.restore()
+    if (clip.textEnabled && clip.textContent) {
+      ctx.save()
+      ctx.font = `800 ${clip.textSize}px Inter, sans-serif`
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      const tw = ctx.measureText(clip.textContent).width
+      const padX = 18, padY = 10
+      const ty = clip.textPos === 'top' ? h * 0.12 : clip.textPos === 'center' ? h / 2 : h * 0.88
+      ctx.fillStyle = clip.textBg || 'rgba(0,0,0,0.55)'
+      const bw = Math.min(w - 40, tw + padX * 2), bh = clip.textSize + padY * 2
+      ctx.beginPath()
+      if (ctx.roundRect) ctx.roundRect(w / 2 - bw / 2, ty - bh / 2, bw, bh, 12); else ctx.rect(w / 2 - bw / 2, ty - bh / 2, bw, bh)
+      ctx.fill()
+      ctx.fillStyle = clip.textColor
+      ctx.fillText(clip.textContent, w / 2, ty, w - 60)
+      ctx.restore()
+    }
+  }
+
+  function makeHiddenVideo() {
+    const hidden = document.createElement('video')
+    hidden.muted = true; hidden.playsInline = true; hidden.preload = 'auto'; hidden.crossOrigin = 'anonymous'
+    hidden.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;'
+    document.body.appendChild(hidden)
+    return hidden
+  }
+  function waitFor(el, event, timeoutMs) {
+    return new Promise((res) => {
+      const t = setTimeout(res, timeoutMs)
+      el.addEventListener(event, () => { clearTimeout(t); res() }, { once: true })
+    })
+  }
+
+  // Fast path: WebCodecs (frame-by-frame, correct timestamps, with audio)
+  async function exportWebCodecs() {
+    const { w, h } = exportDims
+    const FPS = 30
+    const total = clips.reduce((a, c) => a + clipDur(c), 0)
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h
+    const ctx = canvas.getContext('2d')
+
+    // pick video codec
+    const codecCandidates = ['avc1.640028', 'avc1.4D4028', 'avc1.42E01E']
+    let videoCodec = null
+    for (const c of codecCandidates) {
+      try {
+        if (await VideoEncoder.isConfigSupported({ codec: c, width: w, height: h, bitrate: bitrate * 1_000_000, framerate: FPS })) { videoCodec = c; break }
+      } catch {}
+    }
+    if (!videoCodec) throw new Error('codec')
+
+    const target = new ArrayBufferTarget()
+    const muxer = new Muxer({
+      target,
+      video: { codec: 'avc', width: w, height: h },
+      audio: { codec: 'aac', numberOfChannels: 2, sampleRate: 48000 },
+      fastStart: 'in-memory',
+    })
+
+    const videoEncoder = new VideoEncoder()
+    videoEncoder.configure({ codec: videoCodec, width: w, height: h, bitrate: bitrate * 1_000_000, framerate: FPS, latencyMode: 'quality' })
+    videoEncoder.onoutput = (chunk, meta) => muxer.addVideoChunk(chunk, meta.decoderConfig)
+
+    let audioEncoder = null
+    try {
+      audioEncoder = new AudioEncoder()
+      audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 128000 })
+      audioEncoder.onoutput = (chunk, meta) => muxer.addAudioChunk(chunk, meta.decoderConfig)
+    } catch { audioEncoder = null }
+
+    const hidden = makeHiddenVideo()
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    let elapsed = 0
+
+    for (let ci = 0; ci < clips.length; ci++) {
+      if (cancelRef.current) break
+      const clip = clips[ci]
+      hidden.src = clip.url
+      await waitFor(hidden, 'loadedmetadata', 3000)
+      const clipOutDur = clipDur(clip)
+      const nFrames = Math.max(1, Math.round(clipOutDur * FPS))
+
+      // --- video frames (seek-based, fast) ---
+      for (let f = 0; f < nFrames; f++) {
+        if (cancelRef.current) break
+        const t = f / FPS
+        const local = clip.trimStart + t * clip.speed
+        hidden.currentTime = local
+        await waitFor(hidden, 'seeked', 1200)
+        drawFrameToCanvas(ctx, w, h, hidden, clip)
+        const ts = Math.round((elapsed + t) * 1e6)
+        const frame = new VideoFrame(canvas, { timestamp: ts, duration: Math.round(1e6 / FPS) })
+        videoEncoder.encode(frame)
+        frame.close()
+        setExportProgress(Math.min(99, ((elapsed + t) / total) * 100))
+        // yield to keep UI alive
+        if (f % 15 === 0) await new Promise(r => setTimeout(r, 0))
+      }
+
+      // --- audio (only at 1x; other speeds export silent for that clip) ---
+      if (audioEncoder && !clip.muted && clip.speed === 1 && clip.file) {
+        try {
+          const ab = await clip.file.arrayBuffer()
+          const audioBuf = await audioCtx.decodeAudioData(ab)
+          const sr = audioBuf.sampleRate
+          const nCh = Math.min(2, audioBuf.numberOfChannels)
+          const startF = Math.floor(clip.trimStart * sr)
+          const endF = Math.min(audioBuf.length, Math.floor(clip.trimEnd * sr))
+          const segLen = Math.max(0, endF - startF)
+          if (segLen > 0) {
+            const vol = clip.volume ?? 1
+            const chunkFrames = Math.floor(sr * 0.1)
+            for (let off = 0; off < segLen; off += chunkFrames) {
+              if (cancelRef.current) break
+              const len = Math.min(chunkFrames, segLen - off)
+              const data = []
+              for (let ch = 0; ch < nCh; ch++) {
+                const src = audioBuf.getChannelData(ch)
+                const piece = new Float32Array(len)
+                for (let i = 0; i < len; i++) piece[i] = (src[startF + off + i] || 0) * vol
+                data.push(piece)
+              }
+              while (data.length < 2) data.push(new Float32Array(len))
+              const ad = new AudioData({
+                format: 'f32-planar', numberOfFrames: len, sampleRate: sr, numberOfChannels: 2,
+                timestamp: Math.round((elapsed + off / sr) * 1e6), data,
+              })
+              audioEncoder.encode(ad)
+              ad.close()
+            }
+          }
+        } catch {}
+      }
+      elapsed += clipOutDur
+    }
+
+    hidden.remove()
+    if (cancelRef.current) { try { videoEncoder.close() } catch {}; try { audioEncoder?.close() } catch {}; throw new Error('cancelled') }
+    await videoEncoder.flush(); videoEncoder.close()
+    if (audioEncoder) { await audioEncoder.flush(); audioEncoder.close() }
+    muxer.finalize()
+    return new Blob([target.buffer], { type: 'video/mp4' })
+  }
+
+  // Fallback: real-time MediaRecorder (WebM preferred for correct duration)
+  async function exportMediaRecorder() {
     const { w, h } = exportDims
     const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
     const stream = canvas.captureStream(30)
-    let audioTrack = null
-    try {
-      const v = videoRef.current
-      if (v && v.captureStream) {
-        const vs = v.captureStream()
-        audioTrack = vs.getAudioTracks()[0] || null
-        if (audioTrack) stream.addTrack(audioTrack)
-      }
-    } catch {}
-    const mime = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4']
       .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''
     let recorder
     const chunks = []
@@ -427,62 +583,28 @@ export default function App() {
 
     const total = clips.reduce((a, c) => a + clipDur(c), 0)
     let elapsed = 0
-    const hidden = document.createElement('video')
-    hidden.muted = false; hidden.playsInline = true; hidden.preload = 'auto'; hidden.crossOrigin = 'anonymous'
-    hidden.style.display = 'none'; document.body.appendChild(hidden)
+    const hidden = makeHiddenVideo()
+    hidden.muted = false
 
     for (let ci = 0; ci < clips.length; ci++) {
+      if (cancelRef.current) break
       const clip = clips[ci]
       hidden.src = clip.url
-      await new Promise((res, rej) => { hidden.onloadedmetadata = res; hidden.onerror = rej; setTimeout(res, 3000) })
+      await waitFor(hidden, 'loadedmetadata', 3000)
       hidden.playbackRate = clip.speed
       hidden.volume = clip.muted ? 0 : clip.volume
       hidden.currentTime = clip.trimStart
-      await new Promise(res => { hidden.onseeked = res; setTimeout(res, 1500) })
+      await waitFor(hidden, 'seeked', 1500)
       await hidden.play().catch(()=>{})
+      await waitFor(hidden, 'playing', 3000)
       const clipOutDur = clipDur(clip)
-      const startReal = performance.now()
       await new Promise((resolve) => {
         const draw = () => {
-          const played = (performance.now() - startReal) / 1000
-          ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h)
-          ctx.save()
-          try { ctx.filter = buildFilter(clip) } catch {}
-          const vw = hidden.videoWidth || w, vh = hidden.videoHeight || h
-          const rot = (clip.rotation || 0) * Math.PI / 180
-          const swap = clip.rotation === 90 || clip.rotation === 270
-          // crop source rect
-          const cx = clip.cropEnabled ? (clip.cropX || 0) : 0
-          const cy = clip.cropEnabled ? (clip.cropY || 0) : 0
-          const cw = clip.cropEnabled ? (clip.cropW || 1) : 1
-          const ch = clip.cropEnabled ? (clip.cropH || 1) : 1
-          const sx = cx * vw, sy = cy * vh, sw = cw * vw, sh = ch * vh
-          const srcW = swap ? sh : sw, srcH = swap ? sw : sh
-          const fit = Math.min(w / srcW, h / srcH)
-          const dw = srcW * fit * (clip.scale || 1), dh = srcH * fit * (clip.scale || 1)
-          ctx.translate(w / 2, h / 2)
-          ctx.rotate(rot)
-          if (clip.flipH) ctx.scale(-1, 1)
-          ctx.drawImage(hidden, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh)
-          ctx.restore()
-          if (clip.textEnabled && clip.textContent) {
-            ctx.save()
-            ctx.font = `800 ${clip.textSize}px Inter, sans-serif`
-            ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-            const tw = ctx.measureText(clip.textContent).width
-            const padX = 18, padY = 10
-            const ty = clip.textPos === 'top' ? h * 0.12 : clip.textPos === 'center' ? h / 2 : h * 0.88
-            ctx.fillStyle = clip.textBg || 'rgba(0,0,0,0.55)'
-            const bw = Math.min(w - 40, tw + padX * 2), bh = clip.textSize + padY * 2
-            ctx.beginPath()
-            if (ctx.roundRect) ctx.roundRect(w / 2 - bw / 2, ty - bh / 2, bw, bh, 12); else ctx.rect(w / 2 - bw / 2, ty - bh / 2, bw, bh)
-            ctx.fill()
-            ctx.fillStyle = clip.textColor
-            ctx.fillText(clip.textContent, w / 2, ty, w - 60)
-            ctx.restore()
-          }
-          setExportProgress(Math.min(99, ((elapsed + Math.min(played, clipOutDur)) / total) * 100))
-          if (played >= clipOutDur || hidden.ended) { hidden.pause(); resolve() }
+          if (cancelRef.current) { hidden.pause(); resolve(); return }
+          drawFrameToCanvas(ctx, w, h, hidden, clip)
+          const localElapsed = Math.max(0, (hidden.currentTime - clip.trimStart) / clip.speed)
+          setExportProgress(Math.min(99, ((elapsed + Math.min(localElapsed, clipOutDur)) / total) * 100))
+          if (hidden.currentTime >= clip.trimEnd - 0.05 || hidden.ended) { hidden.pause(); resolve() }
           else requestAnimationFrame(draw)
         }
         requestAnimationFrame(draw)
@@ -490,12 +612,40 @@ export default function App() {
       elapsed += clipOutDur
     }
     hidden.remove()
+    if (cancelRef.current) { try { recorder.stop() } catch {}; throw new Error('cancelled') }
     recorder.stop(); await done
-    const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' })
-    const ext = (recorder.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
+    return new Blob(chunks, { type: recorder.mimeType || 'video/webm' })
+  }
+
+  // --- Export ---
+  async function exportVideo() {
+    if (!clips.length) return
+    cancelRef.current = false; setExportCancelled(false)
+    setShowExportModal(true); setExporting(true); setExportProgress(0); setExportDone(null)
+    const { w, h } = exportDims
+    let blob = null, engine = ''
+    try {
+      if (window.VideoEncoder && window.AudioEncoder && window.VideoFrame && window.AudioData) {
+        blob = await exportWebCodecs(); engine = 'Renderização rápida'
+      } else {
+        blob = await exportMediaRecorder(); engine = 'Tempo real'
+      }
+    } catch (err) {
+      if (err?.message === 'cancelled') {
+        setExporting(false); setShowExportModal(false); showToast('Exportação cancelada'); return
+      }
+      // WebCodecs failed → try fallback once
+      try { blob = await exportMediaRecorder(); engine = 'Tempo real' }
+      catch (e2) {
+        setExporting(false)
+        showToast('Falha ao exportar. Tente um vídeo menor.')
+        return
+      }
+    }
+    const ext = (blob.type || '').includes('mp4') ? 'mp4' : 'webm'
     const url = URL.createObjectURL(blob)
     const name = `${projectName.replace(/\s+/g, '-').toLowerCase() || 'filmuse'}.${ext}`
-    setExportProgress(100); setExporting(false); setExportDone({ url, name, size: blob.size, w, h, br: bitrate })
+    setExportProgress(100); setExporting(false); setExportDone({ url, name, size: blob.size, w, h, br: bitrate, engine })
   }
 
   const ratio = ASPECTS[aspect].w / ASPECTS[aspect].h
@@ -854,8 +1004,8 @@ export default function App() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h2>{exportDone ? '✅ Vídeo pronto!' : 'Exportando vídeo...'}</h2>
             <p>{exportDone
-              ? `Seu vídeo foi gerado com ${exportDone.w}×${exportDone.h} a ${exportDone.br} Mbps. Clique abaixo para baixar.`
-              : `Renderizando em ${exportDims.w}×${exportDims.h} a ${bitrate} Mbps. Não feche esta janela.`}</p>
+              ? `Seu vídeo foi gerado com ${exportDone.w}×${exportDone.h} a ${exportDone.br} Mbps (${exportDone.engine || 'Renderização rápida'}). Clique abaixo para baixar.`
+              : `Renderizando em ${exportDims.w}×${exportDims.h} a ${bitrate} Mbps. Pode deixar a aba aberta — é mais rápido que o vídeo.`}</p>
             <div className="progress"><i style={{ width: `${exportProgress}%` }} /></div>
             <p style={{ textAlign: 'center', fontWeight: 700, color: 'var(--text)' }}>{Math.round(exportProgress)}%</p>
             {exportDone && (
@@ -867,7 +1017,9 @@ export default function App() {
               </>
             )}
             <div className="modal-actions">
-              <button className="btn btn-ghost" onClick={() => setShowExportModal(false)}>{exporting ? 'Aguarde...' : 'Fechar'}</button>
+              {exporting
+                ? <button className="btn btn-danger" onClick={() => { cancelRef.current = true }}>✕ Cancelar exportação</button>
+                : <button className="btn btn-ghost" onClick={() => setShowExportModal(false)}>Fechar</button>}
               {exportDone && <a className="btn btn-primary" href={exportDone.url} download={exportDone.name}>⬇ Baixar {exportDone.name}</a>}
             </div>
           </div>
