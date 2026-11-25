@@ -82,6 +82,9 @@ export default function App() {
   const [exportDone, setExportDone] = useState(null)
   const [showExportModal, setShowExportModal] = useState(false)
   const [cropping, setCropping] = useState(false)
+  const [resScale, setResScale] = useState(1) // 1, 0.75, 0.5, 0.33
+  const [bitrate, setBitrate] = useState(8) // Mbps
+  const [qualityPreset, setQualityPreset] = useState('alta')
 
   const videoRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -376,11 +379,30 @@ export default function App() {
     if (p) updateClip(selected.id, { ...p, cropEnabled: !(name === 'cheia') })
   }
 
+  const QUALITY_PRESETS = {
+    alta: { label: 'Alta', desc: 'Qualidade máxima', scale: 1, br: 8 },
+    equilibrada: { label: 'Equilibrada', desc: 'Bom equilíbrio', scale: 0.75, br: 4 },
+    compacta: { label: 'Compacta', desc: 'Arquivo menor', scale: 0.5, br: 2 },
+    minima: { label: 'Mínima', desc: 'Tamanho mínimo', scale: 0.33, br: 1 },
+  }
+  function applyQuality(p) {
+    const q = QUALITY_PRESETS[p]
+    if (!q) return
+    setQualityPreset(p); setResScale(q.scale); setBitrate(q.br)
+  }
+  const exportDims = useMemo(() => {
+    const base = ASPECTS[aspect]
+    const even = (n) => Math.max(2, Math.round(n / 2) * 2)
+    return { w: even(base.w * resScale), h: even(base.h * resScale) }
+  }, [aspect, resScale])
+  const estSizeMB = useMemo(() => (bitrate * totalDur) / 8, [bitrate, totalDur])
+  const fmtSize = (mb) => mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`
+
   // --- Export ---
   async function exportVideo() {
     if (!clips.length) return
     setShowExportModal(true); setExporting(true); setExportProgress(0); setExportDone(null)
-    const { w, h } = ASPECTS[aspect]
+    const { w, h } = exportDims
     const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
     const stream = canvas.captureStream(30)
@@ -397,7 +419,7 @@ export default function App() {
       .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''
     let recorder
     const chunks = []
-    try { recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : undefined) }
+    try { recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: bitrate * 1_000_000 } : undefined) }
     catch { recorder = new MediaRecorder(stream) }
     recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data) }
     const done = new Promise(res => { recorder.onstop = res })
@@ -473,7 +495,7 @@ export default function App() {
     const ext = (recorder.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
     const url = URL.createObjectURL(blob)
     const name = `${projectName.replace(/\s+/g, '-').toLowerCase() || 'filmuse'}.${ext}`
-    setExportProgress(100); setExporting(false); setExportDone({ url, name })
+    setExportProgress(100); setExporting(false); setExportDone({ url, name, size: blob.size, w, h, br: bitrate })
   }
 
   const ratio = ASPECTS[aspect].w / ASPECTS[aspect].h
@@ -696,8 +718,32 @@ export default function App() {
                     <button key={k} className={`chip ${aspect === k ? 'active' : ''}`} style={{ textAlign: 'left', padding: '12px 14px' }} onClick={() => setAspect(k)}>{v.label}</button>
                   ))}
                 </div>
+                <h3>Comprimir tamanho do vídeo</h3>
+                <p className="hint">Reduza o tamanho do arquivo final diminuindo a resolução e a taxa de bits. Ideal para enviar por WhatsApp, e-mail ou subir em sites com limite.</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {Object.entries(QUALITY_PRESETS).map(([k, q]) => (
+                    <button key={k} className={`chip ${qualityPreset === k ? 'active' : ''}`} style={{ textAlign: 'left', padding: '10px 14px' }} onClick={() => applyQuality(k)}>
+                      <b>{q.label}</b> · {q.desc}<br />
+                      <span style={{ fontSize: 12, opacity: .85 }}>{Math.round(ASPECTS[aspect].w * q.scale)}×{Math.round(ASPECTS[aspect].h * q.scale)} · {q.br} Mbps</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="field" style={{ marginTop: 14 }}>
+                  <label>Resolução <output>{exportDims.w}×{exportDims.h} ({Math.round(resScale * 100)}%)</output></label>
+                  <input type="range" min={0.33} max={1} step={0.01} value={resScale}
+                    onChange={e => { setResScale(parseFloat(e.target.value)); setQualityPreset('custom') }} />
+                </div>
+                <div className="field">
+                  <label>Taxa de bits (qualidade) <output>{bitrate} Mbps</output></label>
+                  <input type="range" min={1} max={12} step={0.5} value={bitrate}
+                    onChange={e => { setBitrate(parseFloat(e.target.value)); setQualityPreset('custom') }} />
+                </div>
+                <p className="hint" style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
+                  📦 Tamanho estimado: <b style={{ color: 'var(--text)' }}>~{fmtSize(estSizeMB)}</b> para {fmt(totalDur)} de vídeo<br />
+                  <span style={{ fontSize: 12 }}>Quanto menor a resolução e a taxa de bits, menor o arquivo — mas com menos qualidade.</span>
+                </p>
                 <h3>Exportação</h3>
-                <p className="hint">A exportação é feita no navegador via Canvas + MediaRecorder. O arquivo final é WebM (ou MP4, se o navegador suportar). Qualidade 720p/1080p conforme o formato.</p>
+                <p className="hint">A exportação é feita no navegador via Canvas + MediaRecorder. O arquivo final é WebM (ou MP4, se o navegador suportar).</p>
                 <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} disabled={!clips.length} onClick={exportVideo}>⬇ Exportar agora</button>
               </>
             )}
@@ -807,11 +853,18 @@ export default function App() {
         <div className="modal-back" onClick={() => !exporting && setShowExportModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h2>{exportDone ? '✅ Vídeo pronto!' : 'Exportando vídeo...'}</h2>
-            <p>{exportDone ? 'Seu vídeo foi gerado. Clique abaixo para baixar.' : 'Estamos renderizando seu vídeo quadro a quadro. Não feche esta janela.'}</p>
+            <p>{exportDone
+              ? `Seu vídeo foi gerado com ${exportDone.w}×${exportDone.h} a ${exportDone.br} Mbps. Clique abaixo para baixar.`
+              : `Renderizando em ${exportDims.w}×${exportDims.h} a ${bitrate} Mbps. Não feche esta janela.`}</p>
             <div className="progress"><i style={{ width: `${exportProgress}%` }} /></div>
             <p style={{ textAlign: 'center', fontWeight: 700, color: 'var(--text)' }}>{Math.round(exportProgress)}%</p>
             {exportDone && (
-              <video src={exportDone.url} controls style={{ width: '100%', borderRadius: 12, background: '#000', marginTop: 8 }} />
+              <>
+                <p style={{ textAlign: 'center', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', marginTop: 10 }}>
+                  📦 Tamanho final: <b style={{ color: 'var(--accent2)' }}>{fmtSize(exportDone.size / (1024 * 1024))}</b>
+                </p>
+                <video src={exportDone.url} controls style={{ width: '100%', borderRadius: 12, background: '#000', marginTop: 8 }} />
+              </>
             )}
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={() => setShowExportModal(false)}>{exporting ? 'Aguarde...' : 'Fechar'}</button>
