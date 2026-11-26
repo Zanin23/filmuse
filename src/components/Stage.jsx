@@ -60,6 +60,7 @@ export default function Stage({
   onUpdateText,
   onImportFiles,
   onLoadDemo,
+  onOpenAi,
 }) {
   const stageContainerRef = useRef(null)
   const previewWrapRef = useRef(null)
@@ -856,8 +857,11 @@ export default function Stage({
                   }}
                 />
               </label>
-              <button className="cc-btn cc-btn-ghost" onClick={onLoadDemo}>
+              <button className="cc-btn cc-btn-subtle" onClick={onOpenAi}>
                 <Sparkles size={16} />
+                <span>Pedir ao Ajudante IA</span>
+              </button>
+              <button className="cc-btn cc-btn-ghost" onClick={onLoadDemo}>
                 <span>Abrir projeto demo</span>
               </button>
             </div>

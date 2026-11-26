@@ -7,6 +7,7 @@ import Timeline from './components/Timeline.jsx'
 import RecordModal from './components/RecordModal.jsx'
 import ExportModal from './components/ExportModal.jsx'
 import ShortcutsModal from './components/ShortcutsModal.jsx'
+import { WELCOME_AI_MSG } from './components/AiAssistantPanel.jsx'
 import { useProjectHistory } from './hooks/useHistory.js'
 import {
   DEFAULT_FILTERS,
@@ -161,9 +162,10 @@ export default function App() {
 
   const [projectName, setProjectName] = useState('Meu projeto')
   const [mediaItems, setMediaItems] = useState([])
-  const [leftTab, setLeftTab] = useState('midia')
+  const [leftTab, setLeftTab] = useState('ia')
   const [drawerOpen, setDrawerOpen] = useState(true)
   const [inspectorOpen, setInspectorOpen] = useState(true)
+  const [aiMessages, setAiMessages] = useState([WELCOME_AI_MSG])
 
   const [selection, setSelection] = useState(null)
   const [currentTime, setCurrentTime] = useState(0)
@@ -183,6 +185,7 @@ export default function App() {
   const [exportResult, setExportResult] = useState(null)
 
   const canvasRef = useRef(null)
+  const aiInputRef = useRef(null)
   const cancelExportRef = useRef(false)
   const toastTimerRef = useRef(null)
   const projectRef = useRef(project)
@@ -1236,6 +1239,13 @@ export default function App() {
         if (redo()) showToast('Refeito')
         return
       }
+      if (mod && e.key.toLowerCase() === 'i') {
+        e.preventDefault()
+        setLeftTab('ia')
+        setDrawerOpen(true)
+        setTimeout(() => aiInputRef.current?.focus(), 40)
+        return
+      }
       if (mod && e.key.toLowerCase() === 'd') {
         e.preventDefault()
         handleDuplicateSelected()
@@ -1296,6 +1306,25 @@ export default function App() {
     showToast,
   ])
 
+  const openAiAssistant = useCallback(() => {
+    setLeftTab('ia')
+    setDrawerOpen(true)
+    setTimeout(() => aiInputRef.current?.focus(), 40)
+  }, [])
+
+  const handleApplyAiResult = useCallback(
+    ({ nextProject, seekTime, nextSelection, summaryToast }) => {
+      setIsPlaying(false)
+      commit(nextProject)
+      if (nextSelection !== undefined) setSelection(nextSelection)
+      if (typeof seekTime === 'number' && isFinite(seekTime)) {
+        setCurrentTime(Math.max(0, seekTime))
+      }
+      if (summaryToast) showToast(`✨ ${summaryToast}`)
+    },
+    [commit, showToast]
+  )
+
   const selectedMainClip = selection?.track === 'main' ? clips.find((c) => c.id === selection.id) : null
   const selectedMainIndex = selection?.track === 'main' ? clips.findIndex((c) => c.id === selection.id) : -1
 
@@ -1332,6 +1361,8 @@ export default function App() {
           setShowExportModal(true)
         }}
         onLoadDemo={handleLoadDemo}
+        onOpenAi={openAiAssistant}
+        isAiOpen={drawerOpen && leftTab === 'ia'}
       />
 
       <div className="cc-workspace">
@@ -1368,6 +1399,27 @@ export default function App() {
             showToast('Fundo desfocado ativado em todos os clipes')
           }}
           onLoadDemo={handleLoadDemo}
+          aiProps={{
+            messages: aiMessages,
+            setMessages: setAiMessages,
+            project,
+            projectName,
+            currentTime,
+            totalDur,
+            selection,
+            canUndo,
+            onApplyAiResult: handleApplyAiResult,
+            onUndo: () => undo() && showToast('Ação da IA desfeita'),
+            onDownloadCoverSnapshot: () => {
+              setIsPlaying(false)
+              setCurrentTime(0.5)
+              setTimeout(() => {
+                downloadCanvasSnapshot(canvasRef.current, `${projectName}-capa`)
+                showToast('🖼️ Imagem da capa salva em PNG!')
+              }, 80)
+            },
+            externalInputRef: aiInputRef,
+          }}
         />
 
         <Stage
@@ -1397,6 +1449,7 @@ export default function App() {
           onUpdateText={updateText}
           onImportFiles={handleImportFiles}
           onLoadDemo={handleLoadDemo}
+          onOpenAi={openAiAssistant}
         />
 
         <RightInspector

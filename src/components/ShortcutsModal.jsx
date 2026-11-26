@@ -2,6 +2,7 @@ import React from 'react'
 import { X } from 'lucide-react'
 
 const SHORTCUTS = [
+  ['Ctrl + I', 'Abrir Ajudante de IA'],
   ['Espaço ou K', 'Reproduzir / Pausar'],
   ['S', 'Dividir clipe na agulha (Split)'],
   ['Delete / Backspace', 'Excluir item selecionado'],

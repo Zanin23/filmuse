@@ -4,7 +4,8 @@ Editor de vídeos rápido, intuitivo e moderno inspirado no **Microsoft Clipcham
 
 ## ✨ Recursos
 
-- **Layout Estúdio estilo Clipchamp** — Barra lateral esquerda retrátil (Mídia, Gravar, Texto, Áudio/SFX, Transições e Fundos), palco interativo central, inspetor contextual à direita e timeline multi-faixas.
+- **🤖 Ajudante de IA Integrado (`Ctrl + I`)** — Copiloto conversacional + ações rápidas com 1 clique que executa edições reais no projeto em linguagem natural: criar **capa** (e baixar em PNG), **introdução animada**, **tela final**, **cortar/dividir trechos**, **adaptar para Reels/TikTok 9:16**, **aplicar filtros/efeitos**, **adicionar música de fundo** e **Edição Mágica completa** (100% grátis localmente, com suporte opcional a chave de API externa).
+- **Layout Estúdio estilo Clipchamp** — Barra lateral esquerda retrátil (Ajudante IA, Mídia, Gravar, Texto, Áudio/SFX, Transições e Fundos), palco interativo central, inspetor contextual à direita e timeline multi-faixas.
 - **Timeline Multi-Faixas com Alinhamento Magnético (Snap)**:
   - **Faixa de Texto e Adesivos** — múltiplos títulos, legendas animadas e emojis posicionáveis livremente no tempo e na tela.
   - **Faixa de Camada / Picture-in-Picture (PiP)** — sobreponha vídeos, logos, fotos ou webcam circular com borda e sombra.
@@ -26,6 +27,7 @@ Editor de vídeos rápido, intuitivo e moderno inspirado no **Microsoft Clipcham
 
 | Atalho | Ação |
 | --- | --- |
+| `Ctrl + I` | Abrir Ajudante de IA |
 | `Espaço` ou `K` | Reproduzir / Pausar |
 | `S` | Dividir clipe na agulha (*Split*) |
 | `Delete` / `Backspace` | Excluir item selecionado |
