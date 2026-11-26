@@ -895,6 +895,122 @@ textarea {
   left: 21px;
 }
 
+/* ==================== AJUSTES SIMPLES ==================== */
+.cc-quick-note {
+  background: rgba(45, 212, 191, 0.08);
+  border: 1px solid rgba(45, 212, 191, 0.22);
+  border-radius: 10px;
+  padding: 9px 11px;
+  font-size: 12px;
+  color: #7dd3c8;
+  line-height: 1.45;
+}
+.cc-quick-note b {
+  color: #a7f3ec;
+}
+.cc-quick-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-bottom: 4px;
+}
+.cc-quick-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 9px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  transition: 0.14s;
+  text-align: left;
+}
+.cc-quick-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-card-hover);
+}
+.cc-quick-btn.active {
+  border-color: var(--accent);
+  background: rgba(124, 92, 255, 0.18);
+  color: #fff;
+}
+.cc-quick-btn svg {
+  color: var(--accent-bright);
+}
+.cc-quick-btn.active svg {
+  color: #fff;
+}
+.cc-quick-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.cc-quick-sub {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.cc-quick-btn.active .cc-quick-sub {
+  color: rgba(255, 255, 255, 0.75);
+}
+.cc-quick-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.cc-quick-color {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 2px solid var(--border);
+  transition: 0.14s;
+}
+.cc-quick-color:hover {
+  transform: scale(1.08);
+}
+.cc-quick-color.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.45);
+}
+.cc-guide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-guide-step {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.cc-guide-num {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent-grad);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 800;
+}
+.cc-guide-step strong {
+  display: block;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.cc-guide-step p {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
 /* ==================== CENTER PREVIEW STAGE ==================== */
 .cc-stage {
   flex: 1;

@@ -5,6 +5,7 @@ Editor de vídeos rápido, intuitivo e moderno inspirado no **Microsoft Clipcham
 ## ✨ Recursos
 
 - **🤖 Ajudante de IA Integrado (`Ctrl + I`)** — Copiloto conversacional + ações rápidas com 1 clique que executa edições reais no projeto em linguagem natural: criar **capa** (e baixar em PNG), **introdução animada**, **tela final**, **cortar/dividir trechos**, **adaptar para Reels/TikTok 9:16**, **aplicar filtros/efeitos**, **adicionar música de fundo** e **Edição Mágica completa** (100% grátis localmente, com suporte opcional a chave de API externa).
+- **🎯 Ajustes Simples (inspetor direito)** — qualquer pessoa faz ajustes básicos sem conhecimento de edição: selecione qualquer clipe (vídeo, foto, camada, texto ou áudio) e a aba **“Simples”** abre automaticamente, com botões de 1 clique para brilho, cor, nítidez, enquadramento (16:9, 9:16, 1:1, 4:5), tamanho, duração, ritmo, volume e fades. Se não gostar do resultado, é só apertar `Ctrl+Z`.
 - **Layout Estúdio estilo Clipchamp** — Barra lateral esquerda retrátil (Ajudante IA, Mídia, Gravar, Texto, Áudio/SFX, Transições e Fundos), palco interativo central, inspetor contextual à direita e timeline multi-faixas.
 - **Timeline Multi-Faixas com Alinhamento Magnético (Snap)**:
   - **Faixa de Texto e Adesivos** — múltiplos títulos, legendas animadas e emojis posicionáveis livremente no tempo e na tela.
@@ -45,6 +46,13 @@ npm run dev
 ```
 
 Abra `http://localhost:5173`.
+
+## 👉 Primeiros passos (sem conhecimento de edição)
+
+1. **Importe** seus vídeos, fotos ou áudios no painel **“Sua mídia”** (arraste arquivos ou clique em importar). Se quiser experimentar, use **“Carregar projeto exemplo”**.
+2. **Selecione** o que quer ajustar: clique em qualquer clipe da timeline ou direto no palco.
+3. **Ajuste** com a aba **“Simples”** do inspetor à direita — tudo é botão de 1 clique. Use **Espaço** para visualizar, **S** para cortar e **Ctrl+Z** para desfazer qualquer erro.
+4. Quando estiver pronto, clique em **Exportar** e escolha a qualidade (480p / 720p / 1080p).
 
 ## 📦 Build de Produção
 

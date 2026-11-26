@@ -3,6 +3,7 @@ import {
   Sliders,
   Crop,
   Sparkles,
+  FolderOpen,
   Gauge,
   Volume2,
   Type,
@@ -26,6 +27,7 @@ import {
   FONTS,
 } from '../constants/presets.js'
 import { clipDur, overlayDur, audioDur, fmt } from '../utils/media.js'
+import SimpleAdjustPanel from './SimpleAdjustPanel.jsx'
 
 export default function RightInspector({
   selection,
@@ -34,6 +36,7 @@ export default function RightInspector({
   texts,
   audios,
   mainVideoDuration,
+  currentTime,
   cropping,
   setCropping,
   onUpdateMainClip,
@@ -42,10 +45,14 @@ export default function RightInspector({
   onUpdateText,
   onUpdateAudio,
   onDetachAudio,
+  onToast,
+  onOpenLibrary,
+  onLoadDemo,
   inspectorOpen,
   setInspectorOpen,
 }) {
-  const [tab, setTab] = useState('filtros')
+  const [tab, setTab] = useState('simples')
+  const [tabByTrack, setTabByTrack] = useState({})
 
   const selTrack = selection?.track || null
   const mainClip = selTrack === 'main' ? clips.find((c) => c.id === selection.id) : null
@@ -54,15 +61,24 @@ export default function RightInspector({
   const textClip = selTrack === 'text' ? texts.find((t) => t.id === selection.id) : null
   const audioClip = selTrack === 'audio' ? audios.find((a) => a.id === selection.id) : null
 
-  // Automatically switch to relevant tab when selection track changes
+  // Automatically open the simple-adjust tab (the friendliest) when the selection
+  // changes, remembering which tab the user last picked for each track type.
   useEffect(() => {
     if (!selection) return
-    if (selection.track === 'text') setTab('texto')
-    else if (selection.track === 'audio') setTab('audio')
-    else if (tab === 'texto') setTab('filtros')
-  }, [selection?.track, selection?.id])
+    const remembered = tabByTrack[selection.track]
+    setTab(remembered || 'simples')
+  }, [selection?.track, selection?.id, tabByTrack])
 
   const visualItem = mainClip || overlayClip
+  const simpleItem = selTrack === 'main'
+    ? mainClip
+    : selTrack === 'overlay'
+      ? overlayClip
+      : selTrack === 'text'
+        ? textClip
+        : selTrack === 'audio'
+          ? audioClip
+          : null
   const updateVisual = (patch, coalesceKey) => {
     if (mainClip) onUpdateMainClip(mainClip.id, patch, coalesceKey)
     else if (overlayClip) onUpdateOverlay(overlayClip.id, patch, coalesceKey)
@@ -70,15 +86,20 @@ export default function RightInspector({
 
   const tabs = (() => {
     if (selTrack === 'text') {
-      return [{ id: 'texto', label: 'Texto', Icon: Type }]
+      return [
+        { id: 'simples', label: 'Simples', Icon: Wand2 },
+        { id: 'texto', label: 'Texto', Icon: Type },
+      ]
     }
     if (selTrack === 'audio') {
       return [
+        { id: 'simples', label: 'Simples', Icon: Wand2 },
         { id: 'audio', label: 'Áudio', Icon: Volume2 },
         { id: 'velocidade', label: 'Ritmo', Icon: Gauge },
       ]
     }
     return [
+      { id: 'simples', label: 'Simples', Icon: Wand2 },
       { id: 'filtros', label: 'Filtros', Icon: Sliders },
       { id: 'ajustar', label: 'Ajustar', Icon: Crop },
       { id: 'fade', label: 'Fade', Icon: Sparkles },
@@ -90,9 +111,12 @@ export default function RightInspector({
   const handleRailClick = (id) => {
     if (tab === id && inspectorOpen) {
       setInspectorOpen(false)
-    } else {
-      setTab(id)
-      setInspectorOpen(true)
+      return
+    }
+    setTab(id)
+    setInspectorOpen(true)
+    if (selTrack) {
+      setTabByTrack((prev) => (prev[selTrack] === id ? prev : { ...prev, [selTrack]: id }))
     }
   }
 
@@ -130,7 +154,9 @@ export default function RightInspector({
             <h2>
               {!selection
                 ? 'Propriedades'
-                : tabs.find((t) => t.id === tab)?.label || 'Propriedades'}
+                : tab === 'simples'
+                  ? 'Ajustes simples'
+                  : tabs.find((t) => t.id === tab)?.label || 'Propriedades'}
             </h2>
             <button
               className="cc-icon-btn cc-icon-sm"
@@ -144,10 +170,63 @@ export default function RightInspector({
           <div className="cc-drawer-body">
             {!selection && (
               <div className="cc-empty-box">
-                <p>
-                  Selecione qualquer clipe de vídeo, texto, camada ou áudio na timeline ou no palco para editar suas propriedades aqui.
-                </p>
+                <div className="cc-guide-list">
+                  <div className="cc-guide-step">
+                    <span className="cc-guide-num">1</span>
+                    <div>
+                      <strong>Importe seus vídeos e fotos</strong>
+                      <p>Vá em “Sua mídia” e arraste arquivos ou clique em importar.</p>
+                    </div>
+                  </div>
+                  <div className="cc-guide-step">
+                    <span className="cc-guide-num">2</span>
+                    <div>
+                      <strong>Selecione o que quer ajustar</strong>
+                      <p>Clique em qualquer clipe da timeline ou direto no palco.</p>
+                    </div>
+                  </div>
+                  <div className="cc-guide-step">
+                    <span className="cc-guide-num">3</span>
+                    <div>
+                      <strong>Use a aba “Simples”</strong>
+                      <p>Tudo aqui é em um clique: brilho, cor, tamanho, duração e volume. Se não gostar, use Ctrl+Z.</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="cc-row" style={{ marginTop: 4 }}>
+                  <button
+                    className="cc-btn cc-btn-subtle"
+                    style={{ justifyContent: 'center' }}
+                    onClick={onOpenLibrary}
+                  >
+                    <FolderOpen size={14} />
+                    <span>Importar mídia</span>
+                  </button>
+                  <button
+                    className="cc-btn cc-btn-subtle"
+                    style={{ justifyContent: 'center' }}
+                    onClick={onLoadDemo}
+                  >
+                    <Sparkles size={14} />
+                    <span>Carregar exemplo</span>
+                  </button>
+                </div>
               </div>
+            )}
+
+            {selTrack && tab === 'simples' && simpleItem && (
+              <SimpleAdjustPanel
+                track={selTrack}
+                item={simpleItem}
+                currentTime={currentTime}
+                clips={clips}
+                mainVideoDuration={mainVideoDuration}
+                onUpdateMainClip={onUpdateMainClip}
+                onUpdateOverlay={onUpdateOverlay}
+                onUpdateText={onUpdateText}
+                onUpdateAudio={onUpdateAudio}
+                onToast={onToast}
+              />
             )}
 
             {/* TEXT INSPECTOR */}
