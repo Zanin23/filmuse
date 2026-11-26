@@ -48,6 +48,7 @@ export default function RightInspector({
   onToast,
   onOpenLibrary,
   onLoadDemo,
+  onQuickTrimExport,
   inspectorOpen,
   setInspectorOpen,
 }) {
@@ -226,6 +227,7 @@ export default function RightInspector({
                 onUpdateText={onUpdateText}
                 onUpdateAudio={onUpdateAudio}
                 onToast={onToast}
+                onQuickTrimExport={onQuickTrimExport}
               />
             )}
 

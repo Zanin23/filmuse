@@ -6,6 +6,7 @@ import RightInspector from './components/RightInspector.jsx'
 import Timeline from './components/Timeline.jsx'
 import RecordModal from './components/RecordModal.jsx'
 import ExportModal from './components/ExportModal.jsx'
+import TrimExportModal from './components/TrimExportModal.jsx'
 import ShortcutsModal from './components/ShortcutsModal.jsx'
 import { WELCOME_AI_MSG } from './components/AiAssistantPanel.jsx'
 import { useProjectHistory } from './hooks/useHistory.js'
@@ -31,7 +32,9 @@ import {
 import {
   exportProjectWebCodecs,
   exportProjectMediaRecorder,
+  exportClipSegment,
   downloadCanvasSnapshot,
+  validateExportBlob,
 } from './utils/exporter.js'
 
 const INITIAL_PROJECT = {
@@ -1167,6 +1170,7 @@ export default function App() {
             clips,
             overlays,
             texts,
+            audios,
             totalDur,
             width,
             height,
@@ -1182,6 +1186,7 @@ export default function App() {
           clips,
           overlays,
           texts,
+          audios,
           totalDur,
           width,
           height,
@@ -1196,6 +1201,15 @@ export default function App() {
       const ext = (out.blob.type || '').includes('mp4') ? 'mp4' : 'webm'
       const url = URL.createObjectURL(out.blob)
       const safeName = (projectName || 'filmuse').trim().replace(/\s+/g, '-').toLowerCase()
+
+      // Validate the generated file: measure real duration and confirm audio
+      // is present, so the user doesn't get a silent or mis-timed export.
+      const hasProjectAudio =
+        audios.some((a) => !a.muted) ||
+        clips.some((c) => c.kind === 'video' && !c.muted && (c.volume ?? 1) > 0) ||
+        overlays.some((o) => o.kind === 'video' && !o.muted && (o.volume ?? 1) > 0)
+      const validation = await validateExportBlob(out.blob, totalDur, hasProjectAudio)
+
       setExporting(false)
       setExportResult({
         url,
@@ -1205,6 +1219,7 @@ export default function App() {
         h: height,
         fps,
         engine: out.engine,
+        validation,
       })
     } catch (err) {
       setExporting(false)
@@ -1215,6 +1230,62 @@ export default function App() {
       }
     }
   }
+
+  // --- Fast Trim Export: exports only the trimmed segment of a single clip,
+  // skipping the rest of the project. For simple start/end cuts this renders
+  // a fraction of the time a full export would take.
+  const [trimExport, setTrimExport] = useState(null)
+
+  const handleQuickTrimExport = useCallback(
+    async ({ width, height, fps, bitrate }) => {
+      const clip = trimExport?.clip
+      if (!clip) return
+      cancelExportRef.current = false
+      setExporting(true)
+      setExportResult(null)
+      const segDur = clipDur(clip)
+      setExportProgressInfo({ percent: 0, frame: 0, totalFrames: Math.round(segDur * fps), speedFactor: 0 })
+
+      try {
+        const out = await exportClipSegment({
+          clip,
+          width,
+          height,
+          fps,
+          bitrate,
+          stageBgColor,
+          cancelRef: cancelExportRef,
+          onProgress: setExportProgressInfo,
+        })
+
+        const ext = (out.blob.type || '').includes('mp4') ? 'mp4' : 'webm'
+        const url = URL.createObjectURL(out.blob)
+        const safeName = (projectName || 'filmuse').trim().replace(/\s+/g, '-').toLowerCase()
+        const hasAudio = clip.kind === 'video' && !clip.muted && (clip.volume ?? 1) > 0
+        const validation = await validateExportBlob(out.blob, segDur, hasAudio)
+
+        setExporting(false)
+        setExportResult({
+          url,
+          name: `${safeName}-recorte.${ext}`,
+          size: out.blob.size,
+          w: width,
+          h: height,
+          fps,
+          engine: out.engine,
+          validation,
+        })
+      } catch (err) {
+        setExporting(false)
+        if (err?.message === 'cancelled') {
+          showToast('Exportação do recorte cancelada')
+        } else {
+          showToast('Não foi possível concluir o recorte. Tente reduzir a resolução.')
+        }
+      }
+    },
+    [trimExport, projectName, stageBgColor, showToast]
+  )
 
   // --- Global Studio Keyboard Shortcuts ---
   useEffect(() => {
@@ -1474,6 +1545,11 @@ export default function App() {
             setDrawerOpen(true)
           }}
           onLoadDemo={handleLoadDemo}
+          onQuickTrimExport={(clip) => {
+            setExporting(false)
+            setExportResult(null)
+            setTrimExport({ clip })
+          }}
           inspectorOpen={inspectorOpen}
           setInspectorOpen={setInspectorOpen}
         />
@@ -1527,6 +1603,24 @@ export default function App() {
           onStartExport={handleStartExport}
           onCancelExport={() => { cancelExportRef.current = true }}
           onClose={() => setShowExportModal(false)}
+        />
+      )}
+
+      {trimExport && (
+        <TrimExportModal
+          clip={trimExport.clip}
+          projectName={projectName}
+          aspect={aspect}
+          exporting={exporting}
+          progressInfo={exportProgressInfo}
+          exportResult={exportResult}
+          onStartExport={handleQuickTrimExport}
+          onCancelExport={() => { cancelExportRef.current = true }}
+          onClose={() => {
+            cancelExportRef.current = true
+            setTrimExport(null)
+            setExporting(false)
+          }}
         />
       )}
 
