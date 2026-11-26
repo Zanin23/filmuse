@@ -1459,6 +1459,7 @@ export default function App() {
           texts={texts}
           audios={audios}
           mainVideoDuration={mainVideoDuration}
+          currentTime={currentTime}
           cropping={cropping}
           setCropping={setCropping}
           onUpdateMainClip={updateMainClip}
@@ -1467,6 +1468,12 @@ export default function App() {
           onUpdateText={updateText}
           onUpdateAudio={updateAudio}
           onDetachAudio={handleDetachAudio}
+          onToast={showToast}
+          onOpenLibrary={() => {
+            setLeftTab('midia')
+            setDrawerOpen(true)
+          }}
+          onLoadDemo={handleLoadDemo}
           inspectorOpen={inspectorOpen}
           setInspectorOpen={setInspectorOpen}
         />
