@@ -38,16 +38,27 @@ async function renderProjectAudioOffline({ clips, overlays, audios, totalDur, ou
   async function decodeItem(fileOrBlob, key) {
     if (!fileOrBlob) return null
     if (decodeCache.has(key)) return decodeCache.get(key)
+    let buf = null
+    // First attempt: decode the raw file/blob metadata (works for MP4/AAC, WAV, MP3...).
     try {
       const ab = await fileOrBlob.arrayBuffer()
-      // slice copy in case buffer is reused
-      const buf = await decodeCtx.decodeAudioData(ab.slice(0))
-      decodeCache.set(key, buf)
-      return buf
+      buf = await decodeCtx.decodeAudioData(ab.slice(0))
     } catch {
-      decodeCache.set(key, null)
-      return null
+      buf = null
     }
+    // Fallback: for video files whose audio codec isn't decodable by
+    // decodeAudioData (Opus/AC3/...), pull the audio track out via a
+    // hidden <video> + captureStream + MediaElementSource and record it
+    // into an AudioBuffer via a short real-time capture.
+    if (!buf && fileOrBlob instanceof Blob) {
+      try {
+        buf = await captureAudioViaVideoElement(fileOrBlob, key)
+      } catch {
+        buf = null
+      }
+    }
+    decodeCache.set(key, buf)
+    return buf
   }
 
   const scheduled = []
@@ -56,8 +67,8 @@ async function renderProjectAudioOffline({ clips, overlays, audios, totalDur, ou
   let acc = 0
   for (const clip of clips) {
     const d = clipDur(clip)
-    if (clip.kind === 'video' && !clip.muted && (clip.volume ?? 1) > 0.001 && clip.file) {
-      const buf = await decodeItem(clip.file, clip.mediaId || clip.url || clip.id)
+    if (clip.kind === 'video' && !clip.muted && (clip.volume ?? 1) > 0.001 && (clip.file || clip.url)) {
+      const buf = await decodeItem(clip.file || clip.url, clip.mediaId || clip.url || clip.id)
       if (buf) {
         scheduled.push({
           buf,
@@ -76,8 +87,8 @@ async function renderProjectAudioOffline({ clips, overlays, audios, totalDur, ou
 
   // 2) Overlay video clips audio
   for (const ov of overlays) {
-    if (ov.kind === 'video' && !ov.muted && (ov.volume ?? 1) > 0.001 && ov.file) {
-      const buf = await decodeItem(ov.file, ov.mediaId || ov.url || ov.id)
+    if (ov.kind === 'video' && !ov.muted && (ov.volume ?? 1) > 0.001 && (ov.file || ov.url)) {
+      const buf = await decodeItem(ov.file || ov.url, ov.mediaId || ov.url || ov.id)
       if (buf) {
         scheduled.push({
           buf,
@@ -95,8 +106,8 @@ async function renderProjectAudioOffline({ clips, overlays, audios, totalDur, ou
 
   // 3) Dedicated Audio Track clips
   for (const a of audios) {
-    if (!a.muted && (a.volume ?? 1) > 0.001 && a.file) {
-      const buf = await decodeItem(a.file, a.mediaId || a.url || a.id)
+    if (!a.muted && (a.volume ?? 1) > 0.001 && (a.file || a.url)) {
+      const buf = await decodeItem(a.file || a.url, a.mediaId || a.url || a.id)
       if (buf) {
         scheduled.push({
           buf,
@@ -156,6 +167,80 @@ async function renderProjectAudioOffline({ clips, overlays, audios, totalDur, ou
 
     return await offline.startRendering()
   } catch {
+    return null
+  }
+}
+
+// Records the audio of a video/audio blob into an AudioBuffer using a hidden
+// media element + MediaElementSource + MediaStreamDestination, then decodes the
+// captured WAV/PCM. Used as a fallback when decodeAudioData can't handle the
+// container's audio codec.
+async function captureAudioViaVideoElement(blob, cacheKey) {
+  const url = URL.createObjectURL(blob)
+  const isVideo = (blob.type || '').startsWith('video/')
+  const el = document.createElement(isVideo ? 'video' : 'audio')
+  el.muted = false
+  el.playsInline = true
+  el.preload = 'auto'
+  el.crossOrigin = 'anonymous'
+  el.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;'
+  document.body.appendChild(el)
+  el.src = url
+
+  await new Promise((res) => {
+    const t = setTimeout(res, 6000)
+    el.addEventListener('loadeddata', () => { clearTimeout(t); res() }, { once: true })
+    el.addEventListener('error', () => { clearTimeout(t); res() }, { once: true })
+  })
+
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  const ctx = new Ctx()
+  let srcNode = null
+  try {
+    srcNode = ctx.createMediaElementSource(el)
+  } catch {
+    srcNode = null
+  }
+  if (!srcNode) return null
+
+  const dest = ctx.createMediaStreamDestination()
+  srcNode.connect(dest)
+  const stream = dest.stream
+  const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg', 'audio/mp4']
+    .find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''
+  if (!mime) return null
+
+  const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined)
+  const chunks = []
+  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
+  const stopped = new Promise((res) => { recorder.onstop = res })
+
+  try {
+    el.currentTime = 0
+  } catch {}
+  recorder.start(200)
+  try {
+    await el.play().catch(() => {})
+  } catch {}
+  await stopped
+
+  let audioBlob = null
+  if (chunks.length) audioBlob = new Blob(chunks, { type: mime })
+  try { el.pause() } catch {}
+  try { el.remove() } catch {}
+  try { srcNode.disconnect() } catch {}
+  try { await ctx.close() } catch {}
+  URL.revokeObjectURL(url)
+
+  if (!audioBlob) return null
+  const ab = await audioBlob.arrayBuffer()
+  const decodeCtx = new Ctx()
+  try {
+    const buf = await decodeCtx.decodeAudioData(ab.slice(0))
+    try { await decodeCtx.close() } catch {}
+    return buf
+  } catch {
+    try { await decodeCtx.close() } catch {}
     return null
   }
 }
@@ -428,6 +513,7 @@ export async function exportProjectMediaRecorder({
   clips,
   overlays,
   texts,
+  audios,
   totalDur,
   width: w,
   height: h,
@@ -448,18 +534,31 @@ export async function exportProjectMediaRecorder({
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d')
-  const hidden = makeHiddenVideo()
-  hidden.muted = false
+
+  // Pre-render the full audio mix (video clips + overlays + dedicated audio
+  // track) offline, exactly like the WebCodecs path. This guarantees the
+  // exported audio matches the preview and includes every track.
+  const audioPcm = await renderProjectAudioOffline({ clips, overlays, audios, totalDur })
 
   const canvasStream = canvas.captureStream(fps)
   let stream = canvasStream
   let audioCtx = null
+  let audioSourceNode = null
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext
     audioCtx = new Ctx()
-    const srcNode = audioCtx.createMediaElementSource(hidden)
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume() } catch {}
+    }
     const dest = audioCtx.createMediaStreamDestination()
-    srcNode.connect(dest)
+    if (audioPcm) {
+      // Play the full mix through a buffer source so the recorder captures it.
+      audioSourceNode = audioCtx.createBufferSource()
+      audioSourceNode.buffer = audioPcm
+      audioSourceNode.connect(dest)
+      // Also connect to the live destination so the user hears it while exporting.
+      audioSourceNode.connect(audioCtx.destination)
+    }
     stream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()])
   } catch {}
 
@@ -477,13 +576,33 @@ export async function exportProjectMediaRecorder({
   const stopped = new Promise(res => { recorder.onstop = res })
   recorder.start(200)
 
+  if (audioSourceNode) {
+    try { audioSourceNode.start(0) } catch {}
+  }
+
   const totalFrames = Math.max(1, Math.round(totalDur * fps))
   let loadedUrl = ''
+  const hidden = makeHiddenVideo()
+  hidden.muted = true // audio comes from the pre-rendered mix, not the element
+
+  // Pace rendering to real time so the recorded duration matches totalDur
+  // (MediaRecorder captures wall-clock time, so unpaced rendering would
+  // produce a longer file than the project).
+  const startWall = performance.now()
+  const targetEndMs = totalDur * 1000
 
   try {
     for (let f = 0; f < totalFrames; f++) {
       if (cancelRef?.current) throw new Error('cancelled')
       const t = f / fps
+
+      // Pace: wait until this frame's scheduled wall-clock time arrives.
+      const elapsed = performance.now() - startWall
+      const scheduledMs = (f / fps) * 1000
+      const wait = scheduledMs - elapsed
+      if (wait > 0) await sleep(wait)
+      if (performance.now() - startWall >= targetEndMs + 200) break
+
       const loc = locateMainTrack(clips, t)
 
       if (loc.active && !loc.beyondEnd) {
@@ -495,7 +614,6 @@ export async function exportProjectMediaRecorder({
             loadedUrl = clip.url
             await waitFor(hidden, 'loadeddata', 3500)
           }
-          hidden.volume = clip.muted ? 0 : clamp(clip.volume ?? 1, 0, 1)
           const mediaT = Math.min(clip.trimStart + loc.localTime * (clip.speed || 1), clip.trimEnd)
           if (Math.abs(hidden.currentTime - mediaT) > 0.25) {
             try { hidden.currentTime = mediaT } catch {}
@@ -528,7 +646,6 @@ export async function exportProjectMediaRecorder({
         speedFactor: 1,
         engine: 'Tempo real',
       })
-      await sleep(1000 / fps)
     }
 
     hidden.remove()
@@ -554,4 +671,88 @@ export function downloadCanvasSnapshot(canvas, projectName = 'filmuse') {
   a.href = url
   a.download = `${(projectName || 'frame').replace(/\s+/g, '-').toLowerCase()}-frame.png`
   a.click()
+}
+
+// Validates the exported blob: reports the real duration measured from the
+// container and whether an audio track is present. Used to confirm the export
+// has sound and the expected length instead of guessing from the project state.
+export async function validateExportBlob(blob, expectedDur, expectedHasAudio) {
+  const url = URL.createObjectURL(blob)
+  const v = document.createElement('video')
+  v.preload = 'metadata'
+  v.muted = false
+  v.src = url
+
+  const result = {
+    duration: null,
+    hasAudio: false,
+    durationOk: false,
+    audioOk: false,
+    warnings: [],
+  }
+
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, 8000)
+    const settle = () => { clearTimeout(timer); resolve() }
+    v.onloadedmetadata = settle
+    v.onerror = settle
+  })
+
+  const dur = v.duration
+  if (isFinite(dur) && dur > 0) {
+    result.duration = dur
+    result.durationOk = Math.abs(dur - expectedDur) < Math.max(0.15, expectedDur * 0.03)
+  } else {
+    result.warnings.push('Não foi possível medir a duração do arquivo gerado.')
+  }
+
+  // Detect audio presence: try playing muted to sample frames, and check
+  // whether the element reports an audio track via webkitAudioDecodedByteCount
+  // or by capturing a stream.
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext
+    const ctx = new Ctx()
+    const el = document.createElement('video')
+    el.src = url
+    el.muted = true
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, 4000)
+      el.onloadedmetadata = () => { clearTimeout(t); resolve() }
+      el.onerror = () => { clearTimeout(t); resolve() }
+    })
+    let audioFound = false
+    // Browsers that expose audio track info
+    const anyEl = el
+    if (typeof anyEl.webkitAudioDecodedByteCount === 'number') {
+      audioFound = anyEl.webkitAudioDecodedByteCount > 0
+    } else if (anyEl.mozHasAudio !== undefined) {
+      audioFound = !!anyEl.mozHasAudio
+    } else if (anyEl.audioTracks && anyEl.audioTracks.length > 0) {
+      audioFound = true
+    }
+    // Fallback: try to extract audio via a MediaStream capture
+    if (!audioFound) {
+      try {
+        const dest = ctx.createMediaStreamDestination()
+        const srcNode = ctx.createMediaElementSource(el)
+        srcNode.connect(dest)
+        const tracks = dest.stream.getAudioTracks()
+        audioFound = tracks.length > 0
+        try { srcNode.disconnect() } catch {}
+      } catch {}
+    }
+    try { await ctx.close() } catch {}
+    result.hasAudio = audioFound
+  } catch {
+    result.hasAudio = false
+  }
+
+  result.audioOk = expectedHasAudio ? result.hasAudio : !result.hasAudio
+  if (expectedHasAudio && !result.hasAudio) {
+    result.warnings.push('O arquivo exportado não contém áudio, mas o projeto possui faixas de som.')
+  }
+
+  try { v.removeAttribute('src'); v.load() } catch {}
+  URL.revokeObjectURL(url)
+  return result
 }

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react'
-import { Download, X, CheckCircle2, Sparkles, Film } from 'lucide-react'
+import { Download, X, CheckCircle2, AlertTriangle, Sparkles, Film } from 'lucide-react'
 import { ASPECTS, EXPORT_RESOLUTIONS } from '../constants/presets.js'
 import { fmt, fmtSize } from '../utils/media.js'
 
@@ -150,6 +150,47 @@ export default function ExportModal({
               controls
               className="cc-exported-player"
             />
+
+            {exportResult.validation && (
+              <div
+                className={`cc-validate-box ${
+                  exportResult.validation.durationOk && exportResult.validation.audioOk
+                    ? 'ok'
+                    : 'warn'
+                }`}
+              >
+                <div className="cc-validate-title">
+                  {exportResult.validation.durationOk && exportResult.validation.audioOk
+                    ? <CheckCircle2 size={15} />
+                    : <AlertTriangle size={15} />}
+                  <span>Validação da exportação</span>
+                </div>
+                <ul className="cc-validate-list">
+                  <li>
+                    <span>Duração</span>
+                    <b>
+                      {exportResult.validation.duration != null
+                        ? `${fmt(exportResult.validation.duration)} (esperado ${fmt(totalDur)})`
+                        : 'não medida'}
+                    </b>
+                  </li>
+                  <li>
+                    <span>Áudio</span>
+                    <b>
+                      {exportResult.validation.hasAudio ? 'presente ✅' : 'ausente ⚠️'}
+                    </b>
+                  </li>
+                </ul>
+                {exportResult.validation.warnings?.length > 0 && (
+                  <ul className="cc-validate-warnings">
+                    {exportResult.validation.warnings.map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <div className="cc-export-summary success">
               <div>
                 <CheckCircle2 size={16} />

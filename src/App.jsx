@@ -32,6 +32,7 @@ import {
   exportProjectWebCodecs,
   exportProjectMediaRecorder,
   downloadCanvasSnapshot,
+  validateExportBlob,
 } from './utils/exporter.js'
 
 const INITIAL_PROJECT = {
@@ -1167,6 +1168,7 @@ export default function App() {
             clips,
             overlays,
             texts,
+            audios,
             totalDur,
             width,
             height,
@@ -1182,6 +1184,7 @@ export default function App() {
           clips,
           overlays,
           texts,
+          audios,
           totalDur,
           width,
           height,
@@ -1196,6 +1199,15 @@ export default function App() {
       const ext = (out.blob.type || '').includes('mp4') ? 'mp4' : 'webm'
       const url = URL.createObjectURL(out.blob)
       const safeName = (projectName || 'filmuse').trim().replace(/\s+/g, '-').toLowerCase()
+
+      // Validate the generated file: measure real duration and confirm audio
+      // is present, so the user doesn't get a silent or mis-timed export.
+      const hasProjectAudio =
+        audios.some((a) => !a.muted) ||
+        clips.some((c) => c.kind === 'video' && !c.muted && (c.volume ?? 1) > 0) ||
+        overlays.some((o) => o.kind === 'video' && !o.muted && (o.volume ?? 1) > 0)
+      const validation = await validateExportBlob(out.blob, totalDur, hasProjectAudio)
+
       setExporting(false)
       setExportResult({
         url,
@@ -1205,6 +1217,7 @@ export default function App() {
         h: height,
         fps,
         engine: out.engine,
+        validation,
       })
     } catch (err) {
       setExporting(false)
