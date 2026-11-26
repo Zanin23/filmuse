@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react'
 import {
+  Bot,
   FolderOpen,
   Video,
   Type,
@@ -28,8 +29,10 @@ import {
   BUILTIN_SFX,
 } from '../constants/presets.js'
 import { fmt, synthesizeSfxWav } from '../utils/media.js'
+import AiAssistantPanel from './AiAssistantPanel.jsx'
 
 const RAIL_ITEMS = [
+  { id: 'ia', label: 'Ajudante IA', Icon: Bot, featured: true },
   { id: 'midia', label: 'Sua mídia', Icon: FolderOpen },
   { id: 'gravar', label: 'Gravar e criar', Icon: Video },
   { id: 'texto', label: 'Texto', Icon: Type },
@@ -62,6 +65,7 @@ export default function LeftSidebar({
   onChangeStageBg,
   onEnableBlurFillAll,
   onLoadDemo,
+  aiProps,
 }) {
   const fileInputRef = useRef(null)
   const audioInputRef = useRef(null)
@@ -109,12 +113,12 @@ export default function LeftSidebar({
   return (
     <div className="cc-left-area">
       <nav className="cc-rail" aria-label="Ferramentas de criação">
-        {RAIL_ITEMS.map(({ id, label, Icon }) => {
+        {RAIL_ITEMS.map(({ id, label, Icon, featured }) => {
           const isActive = activeTab === id && drawerOpen
           return (
             <button
               key={id}
-              className={`cc-rail-btn ${isActive ? 'active' : ''}`}
+              className={`cc-rail-btn ${featured ? 'featured-ai' : ''} ${isActive ? 'active' : ''}`}
               onClick={() => handleRailClick(id)}
               title={label}
             >
@@ -126,7 +130,7 @@ export default function LeftSidebar({
       </nav>
 
       {drawerOpen && (
-        <aside className="cc-drawer">
+        <aside className={`cc-drawer ${activeTab === 'ia' ? 'cc-drawer-ai' : ''}`}>
           <div className="cc-drawer-header">
             <h2>{RAIL_ITEMS.find((r) => r.id === activeTab)?.label}</h2>
             <button
@@ -138,8 +142,11 @@ export default function LeftSidebar({
             </button>
           </div>
 
-          <div className="cc-drawer-body">
-            {activeTab === 'midia' && (
+          {activeTab === 'ia' && aiProps ? (
+            <AiAssistantPanel {...aiProps} />
+          ) : (
+            <div className="cc-drawer-body">
+              {activeTab === 'midia' && (
               <>
                 <button
                   className="cc-import-btn"
@@ -556,7 +563,8 @@ export default function LeftSidebar({
                 </div>
               </>
             )}
-          </div>
+            </div>
+          )}
         </aside>
       )}
     </div>

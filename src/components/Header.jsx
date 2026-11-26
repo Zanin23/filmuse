@@ -8,6 +8,7 @@ import {
   FilePlus2,
   Download,
   Sparkles,
+  Bot,
 } from 'lucide-react'
 import { ASPECTS } from '../constants/presets.js'
 import { fmt } from '../utils/media.js'
@@ -28,6 +29,8 @@ export default function Header({
   onNewProject,
   onOpenExport,
   onLoadDemo,
+  onOpenAi,
+  isAiOpen,
 }) {
   return (
     <header className="cc-header">
@@ -96,6 +99,15 @@ export default function Header({
       </div>
 
       <div className="cc-header-right">
+        <button
+          className={`cc-btn cc-btn-ai-top ${isAiOpen ? 'active' : ''}`}
+          onClick={onOpenAi}
+          title="Abrir Ajudante de IA (Ctrl+I)"
+        >
+          <Bot size={15} />
+          <span className="hide-sm">Ajudante IA</span>
+        </button>
+
         {!hasContent && (
           <button
             className="cc-btn cc-btn-subtle"
