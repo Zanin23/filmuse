@@ -1,22 +1,39 @@
-# 🎬 Filmuse — Editor de Vídeo Simples
+# 🎬 Filmuse — Estúdio de Edição no Navegador
 
-Editor de vídeos fácil e prático, direto no navegador. Apenas os básicos de edição, sem complicação.
+Editor de vídeos rápido, intuitivo e moderno inspirado no **Microsoft Clipchamp**, rodando **100% no seu navegador** (nenhum arquivo é enviado para servidores externos).
 
 ## ✨ Recursos
 
-- **Importar vídeos** — arraste e solte ou clique para selecionar (MP4, MOV, WebM…)
-- **Timeline visual** — veja todos os clipes, clique para selecionar, arraste as bordas para cortar
-- **Cortar (Trim)** — ajuste início e fim de cada clipe com sliders ou arrastando na timeline
-- **Velocidade** — 0.25× a 2× (câmera lenta ou acelerado)
-- **Áudio** — volume e silenciar por clipe
-- **Filtros** — 8 presets (Preto e Branco, Sépia, Vintage, Quente, Frio, Dramático, Suave) + ajuste fino de brilho, contraste, saturação, desfoque e matiz
-- **Texto** — adicione título/legenda com cor, tamanho e posição
-- **Orientação** — girar 90° e espelhar horizontalmente
-- **Formatos** — 16:9 (YouTube), 9:16 (Stories/Reels/TikTok), 1:1 e 4:5
-- **Exportar** — renderiza no navegador (Canvas + MediaRecorder) e baixa o arquivo final
-- **Atalho** — `Espaço` para play/pause
+- **Layout Estúdio estilo Clipchamp** — Barra lateral esquerda retrátil (Mídia, Gravar, Texto, Áudio/SFX, Transições e Fundos), palco interativo central, inspetor contextual à direita e timeline multi-faixas.
+- **Timeline Multi-Faixas com Alinhamento Magnético (Snap)**:
+  - **Faixa de Texto e Adesivos** — múltiplos títulos, legendas animadas e emojis posicionáveis livremente no tempo e na tela.
+  - **Faixa de Camada / Picture-in-Picture (PiP)** — sobreponha vídeos, logos, fotos ou webcam circular com borda e sombra.
+  - **Faixa de Vídeo Principal** — storyline magnética com *filmstrip* (tira de miniaturas), reordenação por arraste e corte nas bordas.
+  - **Faixa de Áudio Dedicada** — ondas sonoras (*waveform*) reais, volume até 200%, *fade in / fade out* e separação de áudio de vídeos.
+- **Dividir na Agulha (`S`) & Desfazer/Refazer (`Ctrl+Z` / `Ctrl+Y`)** — corte erros no meio do clipe em um clique e navegue pelo histórico completo de edições.
+- **Gravar e Criar direto no navegador**:
+  - **Tela e Câmera** (grava a tela na faixa principal + webcam circular editável em PiP)
+  - **Gravação de Tela**, **Gravação de Webcam** e **Narração de Voz (Voiceover)** com visualizador ao vivo.
+- **Transições Suaves entre Cenas** — Dissolver (*Crossfade*), Escurecer, Flash Branco, Deslizar, Zoom Dinâmico e Cortina (*Wipe*).
+- **Filtros, Cores & Enquadramento Inteligente**:
+  - 12 presets cinematográficos + exposição, contraste, saturação, matiz, vinheta, desfoque e opacidade.
+  - **Fundo Desfocado (*Blur Fill*)** — ideal para transformar vídeos 16:9 em 9:16 (Reels / TikTok / Shorts).
+  - Movimento de câmera *Ken Burns* em fotos e vídeos + recorte livre com grade dos terços.
+- **Trilhas e Efeitos Sonoros Integrados** — efeitos e loops sintetizados prontos para ouvir e adicionar sem sair do editor.
+- **Exportação Rápida em MP4 (480p / 720p / 1080p, até 60 fps)** — renderização acelerada quadro a quadro via **WebCodecs + `mp4-muxer`** com mixagem de áudio multi-faixas (`OfflineAudioContext`) e fallback automático via `MediaRecorder`.
 
-Tudo roda 100% no navegador — nenhum vídeo é enviado para servidor.
+## ⌨️ Atalhos Rápidos
+
+| Atalho | Ação |
+| --- | --- |
+| `Espaço` ou `K` | Reproduzir / Pausar |
+| `S` | Dividir clipe na agulha (*Split*) |
+| `Delete` / `Backspace` | Excluir item selecionado |
+| `Ctrl + Z` / `Ctrl + Y` | Desfazer / Refazer |
+| `Ctrl + D` | Duplicar item selecionado |
+| `←` / `→` | Voltar / avançar 1 quadro (`Shift` = 1s) |
+| `J` / `L` | Voltar / avançar 5 segundos |
+| `+` / `-` | Zoom na timeline |
 
 ## 🚀 Como rodar
 
@@ -25,14 +42,9 @@ npm install
 npm run dev
 ```
 
-Abra http://localhost:5173
+Abra `http://localhost:5173`.
 
-## 🛠 Tecnologias
-
-- React + Vite
-- HTML5 Video / Canvas / MediaRecorder API
-
-## 📦 Build
+## 📦 Build de Produção
 
 ```bash
 npm run build
