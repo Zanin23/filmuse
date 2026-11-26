@@ -664,6 +664,268 @@ export async function exportProjectMediaRecorder({
   }
 }
 
+// Renders ONLY a trimmed segment of a single main clip — the fast path for
+// simple edits (cutting just the start and/or end). Instead of re-rendering
+// the whole project timeline, it encodes just the trimmed range, so a small
+// cut costs a fraction of a full export.
+export async function exportClipSegment({
+  clip,
+  width: w,
+  height: h,
+  fps = 30,
+  bitrate = 8,
+  stageBgColor = '#000000',
+  cancelRef,
+  onProgress,
+}) {
+  const OUT_SR = 48000
+  const startWall = performance.now()
+
+  if (!clip) throw new Error('clip_invalido')
+  const segDur = clipDur(clip)
+  if (segDur <= 0) throw new Error('segmento_invalido')
+
+  if (clip.kind === 'image' && clip.url) await preloadImage(clip.url)
+
+  // 1) Pick supported H.264 codec
+  let videoCodec = null
+  for (const c of ['avc1.640028', 'avc1.64002A', 'avc1.4D4028', 'avc1.42E01E']) {
+    try {
+      const res = await VideoEncoder.isConfigSupported({
+        codec: c,
+        width: w,
+        height: h,
+        bitrate: Math.round(bitrate * 1_000_000),
+        framerate: fps,
+      })
+      if (res && res.supported) { videoCodec = c; break }
+    } catch {}
+  }
+  if (!videoCodec) throw new Error('codec_unsupported')
+
+  // 2) Render the trimmed audio of this clip only
+  let audioPcm = null
+  if (clip.kind === 'video' && !clip.muted && (clip.volume ?? 1) > 0.001 && (clip.file || clip.url)) {
+    audioPcm = await renderSegmentAudio({
+      blob: clip.file || clip.url,
+      trimStart: clip.trimStart || 0,
+      trimEnd: clip.trimEnd || segDur,
+      speed: clip.speed || 1,
+      volume: clip.volume ?? 1,
+      fadeIn: clip.audioFadeIn || 0,
+      fadeOut: clip.audioFadeOut || 0,
+      segDur,
+      outSampleRate: OUT_SR,
+    })
+  }
+  let audioCodec = null
+  if (audioPcm) {
+    try {
+      const res = await AudioEncoder.isConfigSupported({
+        codec: 'mp4a.40.2',
+        numberOfChannels: 2,
+        sampleRate: OUT_SR,
+        bitrate: 128000,
+      })
+      if (res && res.supported) audioCodec = 'mp4a.40.2'
+    } catch {}
+    if (!audioCodec) audioPcm = null
+  }
+
+  // 3) Create MP4 muxer
+  const target = new ArrayBufferTarget()
+  const muxer = new Muxer({
+    target,
+    video: { codec: 'avc', width: w, height: h },
+    ...(audioCodec ? { audio: { codec: 'aac', numberOfChannels: 2, sampleRate: OUT_SR } } : {}),
+    fastStart: 'in-memory',
+  })
+
+  const videoEncoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (err) => console.error('VideoEncoder error:', err),
+  })
+  videoEncoder.configure({
+    codec: videoCodec,
+    width: w,
+    height: h,
+    bitrate: Math.round(bitrate * 1_000_000),
+    framerate: fps,
+  })
+
+  // 4) Encode audio chunks
+  if (audioCodec && audioPcm) {
+    const audioEncoder = new AudioEncoder({
+      output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+      error: (err) => console.error('AudioEncoder error:', err),
+    })
+    audioEncoder.configure({ codec: audioCodec, numberOfChannels: 2, sampleRate: OUT_SR, bitrate: 128000 })
+    const ch0 = audioPcm.getChannelData(0)
+    const ch1 = audioPcm.numberOfChannels > 1 ? audioPcm.getChannelData(1) : ch0
+    const CHUNK = 16384
+    for (let off = 0; off < audioPcm.length; off += CHUNK) {
+      if (cancelRef?.current) break
+      const len = Math.min(CHUNK, audioPcm.length - off)
+      const data = new Float32Array(len * 2)
+      data.set(ch0.subarray(off, off + len), 0)
+      data.set(ch1.subarray(off, off + len), len)
+      const ad = new AudioData({
+        format: 'f32-planar',
+        sampleRate: OUT_SR,
+        numberOfFrames: len,
+        numberOfChannels: 2,
+        timestamp: Math.round((off / OUT_SR) * 1e6),
+        data,
+      })
+      audioEncoder.encode(ad)
+      ad.close()
+    }
+    if (cancelRef?.current) {
+      try { audioEncoder.close() } catch {}
+      try { videoEncoder.close() } catch {}
+      throw new Error('cancelled')
+    }
+    await audioEncoder.flush()
+    audioEncoder.close()
+  }
+
+  // 5) Canvas for drawing
+  const outCanvas = document.createElement('canvas'); outCanvas.width = w; outCanvas.height = h
+  const outCtx = outCanvas.getContext('2d')
+
+  const hidden = makeHiddenVideo()
+  let loadedUrl = ''
+  const seekVideoEl = async (el, targetTime) => {
+    if (Math.abs(el.currentTime - targetTime) < 1 / (fps * 3)) return
+    let resolved = false
+    const p = new Promise((r) => {
+      const hdl = () => { if (!resolved) { resolved = true; r() } }
+      el.addEventListener('seeked', hdl, { once: true })
+    })
+    try { el.currentTime = targetTime } catch { return }
+    await Promise.race([p, sleep(650)])
+  }
+
+  const cleanupVideos = () => { hidden.remove() }
+
+  const totalFrames = Math.max(1, Math.round(segDur * fps))
+
+  try {
+    for (let f = 0; f < totalFrames; f++) {
+      if (cancelRef?.current) throw new Error('cancelled')
+      const localTime = f / fps
+
+      let srcEl = null
+      if (clip.kind === 'video' && clip.url) {
+        if (loadedUrl !== clip.url) {
+          hidden.src = clip.url
+          loadedUrl = clip.url
+          await waitFor(hidden, 'loadeddata', 4000)
+        }
+        const safeEnd = Math.max(clip.trimStart, clip.trimEnd - 1 / fps)
+        const mediaTime = Math.min(clip.trimStart + localTime * (clip.speed || 1), safeEnd)
+        await seekVideoEl(hidden, mediaTime)
+        srcEl = hidden
+      }
+
+      drawMainClip(outCtx, w, h, clip, srcEl, localTime, stageBgColor)
+
+      const ts = Math.round(localTime * 1e6)
+      const frame = new VideoFrame(outCanvas, {
+        timestamp: ts,
+        duration: Math.round(1e6 / fps),
+        keyFrame: f % (fps * 2) === 0,
+      })
+      videoEncoder.encode(frame, { keyFrame: f % (fps * 2) === 0 })
+      frame.close()
+
+      while (videoEncoder.encodeQueueSize > 24 && !cancelRef?.current) {
+        await sleep(4)
+      }
+
+      if (f % 4 === 0 || f === totalFrames - 1) {
+        const wallSec = Math.max(0.1, (performance.now() - startWall) / 1000)
+        const renderedSec = (f + 1) / fps
+        onProgress?.({
+          percent: Math.min(99, ((f + 1) / totalFrames) * 100),
+          frame: f + 1,
+          totalFrames,
+          speedFactor: renderedSec / wallSec,
+          engine: 'Recorte rápido (WebCodecs MP4)',
+        })
+      }
+      if (f % 15 === 0) await sleep(0)
+    }
+
+    await videoEncoder.flush()
+    videoEncoder.close()
+    cleanupVideos()
+    muxer.finalize()
+    return {
+      blob: new Blob([target.buffer], { type: 'video/mp4' }),
+      engine: 'Recorte rápido (WebCodecs MP4)',
+    }
+  } catch (err) {
+    cleanupVideos()
+    try { videoEncoder.close() } catch {}
+    throw err
+  }
+}
+
+// Renders the trimmed audio of a single clip into an AudioBuffer, used by the
+// fast segment exporter. Same decode + fallback strategy as the full project.
+async function renderSegmentAudio({ blob, trimStart, trimEnd, speed, volume, fadeIn, fadeOut, segDur, outSampleRate }) {
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  if (!Ctx || !window.OfflineAudioContext) return null
+
+  const decodeCtx = new Ctx()
+  let buf = null
+  try {
+    const ab = await blob.arrayBuffer()
+    buf = await decodeCtx.decodeAudioData(ab.slice(0))
+  } catch {
+    buf = null
+  }
+  if (!buf && blob instanceof Blob) {
+    try { buf = await captureAudioViaVideoElement(blob, blob.size + '') } catch { buf = null }
+  }
+  try { await decodeCtx.close() } catch {}
+  if (!buf) return null
+
+  const offset = clamp(trimStart, 0, Math.max(0, buf.duration - 0.01))
+  const srcSpan = Math.min(trimEnd, buf.duration) - offset
+  if (srcSpan <= 0.01) return null
+
+  const totalSamples = Math.max(1, Math.ceil(segDur * outSampleRate))
+  const offline = new OfflineAudioContext(2, totalSamples, outSampleRate)
+  const outDur = srcSpan / speed
+  const src = offline.createBufferSource()
+  src.buffer = buf
+  src.playbackRate.value = speed
+  const gain = offline.createGain()
+  const vol = clamp(volume, 0, 2)
+  const fi = Math.min(fadeIn || 0, outDur * 0.5)
+  const fo = Math.min(fadeOut || 0, outDur * 0.5)
+
+  if (fi > 0.02 || fo > 0.02) {
+    gain.gain.setValueAtTime(fi > 0.02 ? 0.0001 : vol, 0)
+    if (fi > 0.02) gain.gain.linearRampToValueAtTime(vol, Math.max(0, fi))
+    if (fo > 0.02) {
+      const fadeOutStart = Math.max(fi, outDur - fo)
+      gain.gain.setValueAtTime(vol, fadeOutStart)
+      gain.gain.linearRampToValueAtTime(0.0001, outDur)
+    }
+  } else {
+    gain.gain.setValueAtTime(vol, 0)
+  }
+
+  src.connect(gain)
+  gain.connect(offline.destination)
+  src.start(0, offset, srcSpan)
+
+  return await offline.startRendering()
+}
+
 export function downloadCanvasSnapshot(canvas, projectName = 'filmuse') {
   if (!canvas) return
   const url = canvas.toDataURL('image/png')

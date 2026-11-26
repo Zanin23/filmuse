@@ -23,6 +23,7 @@ import {
   Clock,
   Circle,
   Film,
+  Download,
 } from 'lucide-react'
 import { FILTER_PRESETS, DEFAULT_FILTERS } from '../constants/presets.js'
 import { clipDur, overlayDur, fmt, clamp } from '../utils/media.js'
@@ -102,6 +103,7 @@ export default function SimpleAdjustPanel({
   onUpdateText,
   onUpdateAudio,
   onToast,
+  onQuickTrimExport,
 }) {
   if (!item) return null
 
@@ -343,6 +345,19 @@ export default function SimpleAdjustPanel({
             </div>
             <p className="cc-panel-hint" style={{ marginTop: 8 }}>
               Movimente a agulha (espaço para reproduzir) e depois clique. Duração atual: <b>{fmt(clipDur(item))}</b>
+            </p>
+
+            <button
+              className="cc-btn cc-btn-subtle"
+              style={{ width: '100%', justifyContent: 'center', marginTop: 4 }}
+              onClick={() => onQuickTrimExport && onQuickTrimExport(item)}
+              title="Exportar apenas o trecho recortado, sem renderizar o projeto inteiro"
+            >
+              <Download size={14} />
+              <span>Exportar recorte rápido</span>
+            </button>
+            <p className="cc-panel-hint" style={{ marginTop: 6, marginBottom: 0 }}>
+              Baixo corte (início/fim)? Exporta só esse segmento — renderiza muito mais rápido que o vídeo inteiro.
             </p>
 
             <h3 className="cc-sec-title">Ritmo</h3>
